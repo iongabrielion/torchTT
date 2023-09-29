@@ -31,7 +31,7 @@ print('Relative error of the solution  ',(xs-x).norm()/x.norm())
 # We now solve the problem $\Delta u = 1$ in $[0,1]^d$ with $ u = 0 $ on the entire boundary using finite differences.
 # First, set the size of the problem (n is the mode size and d is the number of dimensions):
 dtype = tn.float64 
-n =  64
+n =  256
 d = 8
 
 # Create the finite differences matrix corresponding to the problem. The operator is constructed directly in the TT format as it follows
@@ -57,8 +57,17 @@ for i in range(d-1):
     b_tt = b_tt**b1d
    
 # Solve the system 
+print("Not Banded structure")
 time = datetime.datetime.now()
-x = tntt.solvers.amen_solve(L_tt, b_tt ,x0 = b_tt, nswp = 20, eps = 1e-7, verbose = True, preconditioner='c', use_cpp = True)
+x = tntt.solvers.amen_solve(L_tt, b_tt, x0=b_tt, nswp=20, eps=1e-8, verbose=False, preconditioner=None, use_cpp=True)
+time = datetime.datetime.now() - time
+print('Relative residual: ',(L_tt@x-b_tt).norm()/b_tt.norm())
+print('Solver time: ',time)
+
+print("Banded structure")
+bands_A = [1] * len(L_tt.cores)
+time = datetime.datetime.now()
+x = tntt.solvers.amen_solve(L_tt, b_tt, x0=b_tt, nswp=20, eps=1e-8, verbose=False, bandsA=bands_A, preconditioner=None, use_cpp=True)
 time = datetime.datetime.now() - time
 print('Relative residual: ',(L_tt@x-b_tt).norm()/b_tt.norm())
 print('Solver time: ',time)

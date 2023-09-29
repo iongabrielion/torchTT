@@ -10,6 +10,7 @@ import datetime
 from torchtt._decomposition import QR, SVD, lr_orthogonal, rl_orthogonal, rank_chop
 from torchtt._iterative_solvers import BiCGSTAB_reset, gmres_restart
 import opt_einsum as oe
+import torch.nn.functional as tnf
 from .errors import *
 
 
@@ -32,10 +33,93 @@ def cpp_enabled():
     """
     return _flag_use_cpp
 
+# def _local_AB(Phi_left, Phi_right, coreA, coreB, bandA=-1, bandB=-1):
+#     """
+#     Perfomrs the contraction for the right side of amen mm
 
-def _local_AB(Phi_left, Phi_right, coreA, coreB, bandA = -1, bandB = -1):
+#     Args:
+#         Phi_left (torch.tensor): left phi
+#         Phi_right (torch.tensor): right phi
+#         coreA (torch.tensor): core of A
+#         coreB (torch.tensor): core of B
+#         bandA (int): if positive specifies number of diagonals in the square matrix core of A [i, :, :, j]. 0 means diagonal structure, 1 means                        tridiagonal, ...
+#         bandB (int): if positive specifies number of diagonals in the square matrix core of B [i, :, :, j]. 0 means diagonal structure, 1 means                        tridiagonal, ...
+
+#     Returns:
+#         torch.tensor: _description_
+#     """
+#     w = tn.zeros(Phi_left.shape[0], coreA.shape[1], coreB.shape[2], Phi_right.shape[0], dtype=coreA.dtype, device=coreA.device)
+#     if coreA.shape[1] != coreA.shape[2]:
+#         bandA = -1
+#     if coreB.shape[1] != coreB.shape[2]:
+#         bandB = -1
+#     if bandA < 0:
+#         if bandB < 0:
+#             w = oe.contract('rab,amkA,bknB,RAB->rmnR', Phi_left, coreA, coreB, Phi_right)
+#         else:
+#             for i in range(-bandB, bandB+1):
+#                 diag_B = tn.diagonal(coreB, i, 1, 2)
+#                 if i < 0:
+#                     w[:, :, :i, :] += oe.contract('rab,amnA,bBn,RAB->rmnR', Phi_left, coreA[:, :, -i:, :], diag_B, Phi_right)
+#                 elif i > 0:
+#                     w[:, :, i:, :] += oe.contract('rab,amnA,bBn,RAB->rmnR', Phi_left, coreA[:, :, :-i, :], diag_B, Phi_right)
+#                 else:
+#                     w += oe.contract('rab,amnA,bBn,RAB->rmnR', Phi_left, coreA, diag_B, Phi_right)
+#     else:
+#         if bandB < 0: 
+#             for i in range(-bandA, bandA+1):
+#                 diag_A = tn.diagonal(coreA, i, 1, 2)
+#                 if i < 0:
+#                     w[:, -i:, :, :] += oe.contract('rab,aAm,bmnB,RAB->rmnR', Phi_left, diag_A, coreB[:, :i, :, :], Phi_right)
+#                 elif i > 0:
+#                     w[:, :-i, :, :] += oe.contract('rab,aAm,bmnB,RAB->rmnR', Phi_left, diag_A, coreB[:, i:, :, :], Phi_right)
+#                 else:
+#                     w += oe.contract('rab,aAm,bmnB,RAB->rmnR', Phi_left, diag_A, coreB, Phi_right)
+#         else:  
+#             band = min(bandA + bandB, coreA.shape[1] - 1)
+#             band_min = min(bandA, bandB)
+#             for k in range(-band, band+1):
+#                 diag_w = tn.diagonal(w, k, 1, 2)
+#                 if k > 0:
+#                     b = bandA - k
+#                     d = bandB - k
+#                     for l in [*range(-min(d, bandA), 0),  *range(max(0, k-bandB), min(k, bandA)+1), *range(k+1, k+min(b, bandB)+1)]:
+#                         diag_A = tn.diagonal(coreA, l, 1, 2)
+#                         diag_B = tn.diagonal(coreB, k-l, 1, 2)
+#                         if l < k:
+#                             diag_A = diag_A[:, :, :max(l, 0)-k]
+#                         diag_B = diag_B[:, :, min(k, max(l, 0)):]
+#                         diag_w_slice = diag_w[:, :, max(-l, 0):]
+#                         if l > k:
+#                             diag_w_slice = diag_w_slice[:, :, :k-l]
+#                         diag_w_slice += oe.contract('rab,aAm,bBm,RAB->rRm', Phi_left, diag_A, diag_B, Phi_right)
+#                 elif k < 0:
+#                     d = bandB + k
+#                     b = bandA + k
+#                     for l in [*range(min(k-d, -bandA), k), *range(max(k, -bandB), min(0, k+bandA)+1), *range(1, min(b, bandB)+1)]:
+#                         diag_B = tn.diagonal(coreB, l, 1, 2)
+#                         diag_A = tn.diagonal(coreA, k-l, 1, 2)
+#                         diag_A = diag_A[:, :, max(-max(l, k), 0):]
+#                         if l > k:
+#                             diag_B = diag_B[:, :, :k-min(l, 0)]
+#                         diag_w_slice = diag_w[:, :, max(0, l):]
+#                         if l < k:
+#                             diag_w_slice = diag_w_slice[:, :, :l-k]
+#                         diag_w_slice += oe.contract('rab,aAm,bBm,RAB->rRm', Phi_left, diag_A, diag_B, Phi_right)
+#                 else:
+#                     for l in range(-band_min, band_min+1):
+#                         diag_A = tn.diagonal(coreA, l, 1, 2)
+#                         diag_B = tn.diagonal(coreB, -l, 1, 2)
+#                         if l > 0:
+#                             diag_w[:, :, :-l] += oe.contract('rab,aAm,bBm,RAB->rRm', Phi_left, diag_A, diag_B, Phi_right)
+#                         else:
+#                             diag_w[:, :, -l:] += oe.contract('rab,aAm,bBm,RAB->rRm', Phi_left, diag_A, diag_B, Phi_right)
+            
+#     return w
+
+def _local_AB(Phi_left, Phi_right, coreA, coreB, bandA=-1, bandB=-1):
     """
-    PErfomrs the contraction for the right side of amen mm
+    Perfomrs the contraction for the right side of amen mm
 
     Args:
         Phi_left (torch.tensor): left phi
@@ -46,13 +130,32 @@ def _local_AB(Phi_left, Phi_right, coreA, coreB, bandA = -1, bandB = -1):
     Returns:
         torch.tensor: _description_
     """
-    w = oe.contract('rab,amkA,bknB,RAB->rmnR',
-                    Phi_left, coreA, coreB, Phi_right)
-
+    w = tn.zeros(Phi_left.shape[0], coreA.shape[1], coreB.shape[2], Phi_right.shape[0], dtype=coreA.dtype, device=coreA.device)
+    if (bandA >= 0) and (bandB >= 0):
+        if (bandA >= bandB):
+            bandA = -1
+        else:
+            bandB = -1
+        
+    if bandA < 0:
+        if bandB < 0:
+            w = oe.contract('rab,amkA,bknB,RAB->rmnR',
+                            Phi_left, coreA, coreB, Phi_right)        
+        else:
+            diagonals = tn.stack([tnf.pad(tn.diagonal(coreB, i, 1, 2), (-i, 0)) for i in range(-bandB, 0)] + 
+                                 [tnf.pad(tn.diagonal(coreB, i, 1, 2), (0, i)) for i in range(0, bandB+1)])
+            tmp = oe.contract('rab,amnA,lbBn,RAB->lrmnR', Phi_left, coreA, diagonals, Phi_right)
+            w = tn.sum(tn.stack([tnf.pad(tmp[i + bandB, :, :, -i:, :], (0, 0, 0, -i)) for i in range(-bandB, 1)] + 
+                                [tnf.pad(tmp[i + bandB, :, :, :-i, :], (0, 0, i, 0)) for i in range(1, bandB+1)]), axis=0)
+    else:
+        diagonals = tn.stack([tnf.pad(tn.diagonal(coreA, i, 1, 2), (0, -i)) for i in range(-bandA, 0)] + 
+                             [tnf.pad(tn.diagonal(coreA, i, 1, 2), (i, 0)) for i in range(0, bandA+1)])
+        tmp = oe.contract('rab,laAm,bmnB,RAB->lrmnR', Phi_left, diagonals, coreB, Phi_right)
+        w = tn.sum(tn.stack([tnf.pad(tmp[i + bandA, :, i:, :, :], (0, 0, 0, 0, 0, i)) for i in range(0, bandA+1)] + 
+                            [tnf.pad(tmp[i + bandA, :, :i, :, :], (0, 0, 0, 0, -i, 0)) for i in range(-bandA, 0)]), axis=0)
     return w
 
-
-def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False, use_cpp=True):
+def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False, use_cpp=True, bandsA=None):
     """
     Compute the matrix vector product between a TTM and a TT.
     Suited when the output is expected to be low rank. 
@@ -68,6 +171,7 @@ def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, v
         kick2 (int, optional): [description]. Defaults to 0.
         verbose (bool, optional): choose whether to display or not additional information during the runtime. Defaults to True.
         use_cpp (bool, optional): use the C++ implementation of AMEn. Defaults to True.
+        bandsA (list, optional): for each core if positive specifies number of diagonals in the square matrix core of A [i, :, :, j].
 
     Raises:
         InvalidArguments: A and b must be TT instances.
@@ -98,10 +202,10 @@ def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, v
         # cores = torchttcpp.amen_solve(A_cores, B_cores, x_cores, b.N, A.R, b.R, x_R, nswp, eps, rmax, max_full, kickrank, kick2, local_iterations, resets, verbose, prec)
         # return torchtt.TT(list(cores))
     else:
-        return _amen_mm_python(A.cores, [c[:, :, None, :] for c in b.cores], A.M, [1]*len(A.M), A.N, False, nswp, x0.cores if x0 is not None else None, x0.R if x0 is not None else None, eps, rmax, kickrank, kick2, verbose)
+        return _amen_mm_python(A.cores, [c[:, :, None, :] for c in b.cores], A.M, [1]*len(A.M), A.N, False, nswp, x0.cores if x0 is not None else None, x0.R if x0 is not None else None, eps, rmax, kickrank, kick2, verbose, bandsA)
 
 
-def amen_mm(A, B, nswp=22, X0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False):
+def amen_mm(A, B, nswp=22, X0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False, bandsA=None, bandsB=None):
     """
     Perform the TTM-TTM product using AMEn optimization.
     Suited when the operators have high ranks, but the result is expected to be low rank.
@@ -116,14 +220,20 @@ def amen_mm(A, B, nswp=22, X0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, v
         kickrank (int, optional): kickrank. Defaults to 4.
         kick2 (int, optional): kick2. Defaults to 0.
         verbose (bool, optional): show debug info. Defaults to False.
+        bandsA (list, optional): for each core if positive specifies number of diagonals in the square matrix core of A [i, :, :, j].
+        bandsB (list, optional): for each core if positive specifies number of diagonals in the square matrix core of B [i, :, :, j].
 
     Returns:
         torchtt.TT: the result.
     """
-    return _amen_mm_python(A.cores, B.cores, A.M, B.N, A.N, True, nswp, X0.cores if X0 is not None else None, X0.R if X0 is not None else None,   eps, rmax, kickrank, kick2, verbose)
+    return _amen_mm_python(A.cores, B.cores, A.M, B.N, A.N, True, nswp, X0.cores if X0 is not None else None, X0.R if X0 is not None else None,   eps, rmax, kickrank, kick2, verbose, bandsA, bandsB)
 
 
-def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, rx=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False):
+def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, rx=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False, bandsA=None, bandsB=None):
+    if bandsA == None:
+        bandsA = [-1] * len(A_cores)
+    if bandsB == None:
+        bandsB = [-1] * len(B_cores)
     if verbose:
         time_total = datetime.datetime.now()
 
@@ -198,7 +308,7 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
                                     Phiz[k], x_cores[k], Phiz[k+1])
                     # shape is rzp x MN x rz
                     czAB = _local_AB(
-                        Phiz_rhs[k], Phiz_rhs[k+1], A_cores[k], B_cores[k])
+                        Phiz_rhs[k], Phiz_rhs[k+1], A_cores[k], B_cores[k], bandsA[k], bandsB[k])
 
                     cz_new = czAB*nrmsc - czx
                     _, _, vz = SVD(tn.reshape(cz_new, [cz_new.shape[0], -1]))
@@ -236,8 +346,8 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
 
             # update phis (einsum)
             Phis[k] = _compute_phi_bck_x(Phis[k+1], x_cores[k], x_cores[k])
-            Phis_rhs[k] = _compute_phi_bck_AB(
-                Phis_rhs[k+1], A_cores[k], B_cores[k], x_cores[k])
+            Phis_rhs[k] = _compute_phi_AB('bck',
+                Phis_rhs[k+1], A_cores[k], B_cores[k], x_cores[k], bandsA[k], bandsB[k])
 
             # ... and norms
             # norm = tn.linalg.norm(Phis[k])
@@ -256,8 +366,8 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
             if not last:
                 Phiz[k] = _compute_phi_bck_x(
                     Phiz[k+1], z_cores[k], x_cores[k]) / normA[k-1]
-                Phiz_rhs[k] = _compute_phi_bck_AB(
-                    Phiz_rhs[k+1], A_cores[k], B_cores[k], z_cores[k]) / normb[k-1]
+                Phiz_rhs[k] = _compute_phi_AB('bck',
+                    Phiz_rhs[k+1], A_cores[k], B_cores[k], z_cores[k], bandsA[k], bandsB[k]) / normb[k-1]
 
         # start loop
         max_dx = 0
@@ -269,7 +379,7 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
 
             # compute new approximation
             solution_now = _local_AB(
-                Phis_rhs[k], Phis_rhs[k+1], A_cores[k], B_cores[k]) * nrmsc
+                Phis_rhs[k], Phis_rhs[k+1], A_cores[k], B_cores[k], bandsA[k], bandsB[k]) * nrmsc
             norm_solution = tn.linalg.norm(solution_now)
 
             # compute residual and step size
@@ -304,7 +414,9 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
                     'zr,rmnR,ZR->zmnZ', Phiz[k], tn.reshape(u@v.t(), [rx[k], M[k], N[k], rx[k+1]]), Phiz[k+1])
                 # shape is rzp x MN x rz
                 czAB = _local_AB(
-                    Phiz_rhs[k], Phiz_rhs[k+1], A_cores[k], B_cores[k])
+                    Phiz_rhs[k], Phiz_rhs[k+1], A_cores[k], B_cores[k], bandsA[k], bandsB[k])
+                # czAB_not_band = _local_AB(
+                #     Phiz_rhs[k], Phiz_rhs[k+1], A_cores[k], B_cores[k])
 
                 cz_new = czAB*nrmsc - czx
 
@@ -326,7 +438,7 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
                         'zr,rmnR,ZR->zmnZ', Phis[k], tn.reshape(u@v.t(), [rx[k], M[k], N[k], rx[k+1]]), Phiz[k+1])
                     # shape is rzp x MN x rz
                     czAB = _local_AB(
-                        Phis_rhs[k], Phiz_rhs[k+1], A_cores[k], B_cores[k])
+                        Phis_rhs[k], Phiz_rhs[k+1], A_cores[k], B_cores[k], bandsA[k], bandsB[k])
 
                     uk = czAB*nrmsc - czx
 
@@ -356,9 +468,9 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
 
                 # next phis with norm correction
                 Phis[k+1] = _compute_phi_fwd_x(Phis[k], x_cores[k], x_cores[k])
-                Phis_rhs[k+1] = _compute_phi_fwd_AB(
-                    Phis_rhs[k], A_cores[k], B_cores[k], x_cores[k])
-
+                Phis_rhs[k+1] = _compute_phi_AB('fwd',
+                    Phis_rhs[k], A_cores[k], B_cores[k], x_cores[k], bandsA[k], bandsB[k])
+                
                 # ... and norms
                 # norm = tn.linalg.norm(Phis[k+1])
                 # norm = norm if norm > 0 else 1.0
@@ -376,8 +488,8 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
                 if not last:
                     Phiz[k+1] = _compute_phi_fwd_x(Phiz[k],
                                                    z_cores[k], x_cores[k]) / normA[k]
-                    Phiz_rhs[k+1] = _compute_phi_fwd_AB(
-                        Phiz_rhs[k], A_cores[k], B_cores[k], z_cores[k]) / normb[k]
+                    Phiz_rhs[k+1] = _compute_phi_AB('fwd',
+                        Phiz_rhs[k], A_cores[k], B_cores[k], z_cores[k], bandsA[k], bandsB[k]) / normb[k]
             else:
                 x_cores[k] = tn.reshape(
                     u@tn.diag(s[:r]) @ v[:r, :].t(), [rx[k], M[k], N[k], rx[k+1]])
@@ -447,41 +559,167 @@ def _compute_phi_fwd_x(Phi_now, core_left, core_right):
     Phi_next = oe.contract('lr,lMNL,rMNR->LR', Phi_now, core_left, core_right)
 
     return Phi_next
-
-
-def _compute_phi_bck_AB(Phi_now, coreA, coreB, core):
+    
+def _compute_phi_AB(order, Phi_now, coreA, coreB, core, bandA=-1, bandB=-1):
     """
 
 
     Args:
-        Phi_now (torch.tensor): The current phi. Has shape r_k+1 x rA_k+1 x rB_k+1
+        order(str): fwd - for forward phi or bck - for backward phi
+        Phi_now (torch.tensor): The current phi. 
+                                If order is fwd has shape r_k x rA_k x rB_k.
+                                If order is bck has shape  r_k+1 x rA_k+1 x rB_k+1
         coreA (torch.tensor): The current core of the rhs. Has shape rA_k x M_k x K_k x rA_k+1
         coreB (torch.tensor): The current core of the rhs. Has shape rB_k x K_k x N_k x rB_k+1
         core (torch.tensor): The current core. Has shape r_k x M_k x N_k x r_k+1
 
     Returns:
-        torch.tensor: The backward phi corresponding to the rhs. Has shape r_k x rA_k x rB_k
-    """
-
-    Phi = oe.contract('RAB,amkA,bknB,rmnR->rab', Phi_now, coreA, coreB, core)
-
+        torch.tensor: If order is fwd: the forward phi corresponding to the rhs. Has shape r_k+1 x rA_k+1 x rB_k+1
+                      If order is bck: the backward phi corresponding to the rhs. Has shape r_k x rA_k+1 x rB_k+1
+    """ 
+    if coreA.shape[1] != coreA.shape[2]:
+        bandA = -1
+    if coreB.shape[1] != coreB.shape[2]:
+        bandB = -1
+    if (bandA >= 0) and (bandB >= 0):
+        if (bandA >= bandB):
+            bandA = -1
+        else:
+            bandB = -1
+    
+    if bandA < 0:
+        if bandB < 0:
+            if order == 'bck':
+                Phi = oe.contract('RAB,amkA,bknB,rmnR->rab', Phi_now, coreA, coreB, core)
+            else:
+                Phi = oe.contract('rab,amkA,bknB,rmnR->RAB', Phi_now, coreA, coreB, core)
+        else:
+            if order == 'bck':
+                sizes = 'RAB,amkA,lbBk,lrmkR->rab'
+            else:
+                sizes = 'rab,amkA,lbBk,lrmkR->RAB'
+            diagonals_B = tn.stack([tnf.pad(tn.diagonal(coreB, i, 1, 2), (-i, 0))for i in range(-bandB, 0)] + 
+                                   [tnf.pad(tn.diagonal(coreB, i, 1, 2), (0, i)) for i in range(0, bandB+1)])
+            cores = tn.stack([tnf.pad(core[:, :, :i, :], (0, 0, -i, 0)) for i in range(-bandB, 0)] + 
+                             [tnf.pad(core[:, :, i:, :], (0, 0, 0, i)) for i in range(0, bandB+1)])
+            Phi = oe.contract(sizes, Phi_now, coreA, diagonals_B, cores)
+    else: 
+            if order == 'bck':
+                sizes = 'RAB,laAk,bknB,lrknR->rab'
+            else:
+                sizes = 'rab,laAk,bknB,lrknR->RAB'
+            diagonals_A = tn.stack([tnf.pad(tn.diagonal(coreA, i, 1, 2), (0, -i))for i in range(-bandA, 0)] + 
+                                    [tnf.pad(tn.diagonal(coreA, i, 1, 2), (i, 0)) for i in range(0, bandA+1)])
+            cores = tn.stack([tnf.pad(core[:, -i:, :, :], (0, 0, 0, 0, 0, -i)) for i in range(-bandA, 1)] + 
+                             [tnf.pad(core[:, :-i, :, :], (0, 0, 0, 0, i, 0)) for i in range(1, bandA+1)])
+            Phi = oe.contract(sizes, Phi_now, diagonals_A, coreB, cores)
     return Phi
 
 
-def _compute_phi_fwd_AB(Phi_now, coreA, coreB, core):
-    """
+# def _compute_phi_AB(order, Phi_now, coreA, coreB, core, bandA=-1, bandB=-1):
+#     """
 
 
-    Args:
-        Phi_now (torch.tensor): The current phi. Has shape r_k x rA_k x rB_k
-        coreA (torch.tensor): The current core of the rhs. Has shape rA_k x M_k x K_k x rA_k+1
-        coreB (torch.tensor): The current core of the rhs. Has shape rB_k x K_k x N_k x rB_k+1
-        core (torch.tensor): The current core. Has shape r_k x M_k x N_k x r_k+1
+#     Args:
+#         order(str): fwd - for forward phi or bck - for backward phi
+#         Phi_now (torch.tensor): The current phi. 
+#                                 If order is fwd has shape r_k x rA_k x rB_k.
+#                                 If order is bck has shape  r_k+1 x rA_k+1 x rB_k+1
+#         coreA (torch.tensor): The current core of the rhs. Has shape rA_k x M_k x K_k x rA_k+1
+#         coreB (torch.tensor): The current core of the rhs. Has shape rB_k x K_k x N_k x rB_k+1
+#         core (torch.tensor): The current core. Has shape r_k x M_k x N_k x r_k+1
 
-    Returns:
-        torch.tensor: The backward phi corresponding to the rhs. Has shape r_k+1 x rA_k+1 x rB_k+1
-    """
-    Phi_next = oe.contract('rab,amkA,bknB,rmnR->RAB',
-                           Phi_now, coreA, coreB, core)
-
-    return Phi_next
+#     Returns:
+#         torch.tensor: If order is fwd: the forward phi corresponding to the rhs. Has shape r_k+1 x rA_k+1 x rB_k+1
+#                       If order is bck: the backward phi corresponding to the rhs. Has shape r_k x rA_k+1 x rB_k+1
+#     """
+#     #print("last var")
+#     if order == 'bck':
+#         Phi = tn.zeros(core.shape[0], coreA.shape[0], coreB.shape[0], dtype=coreA.dtype, device=coreA.device)
+#     elif order == 'fwd':
+#         Phi = tn.zeros(core.shape[-1], coreA.shape[-1], coreB.shape[-1], dtype=coreA.dtype, device=coreA.device)
+#     else:
+#         assert(0)
+    
+#     if coreA.shape[1] != coreA.shape[2]:
+#         bandA = -1
+#     if coreB.shape[1] != coreB.shape[2]:
+#         bandB = -1
+    
+#     if bandA < 0:
+#         if bandB < 0:
+#             if order == 'bck':
+#                 Phi = oe.contract('RAB,amkA,bknB,rmnR->rab', Phi_now, coreA, coreB, core)
+#             else:
+#                 Phi = oe.contract('rab,amkA,bknB,rmnR->RAB', Phi_now, coreA, coreB, core)
+#         else:
+#             if order == 'bck':
+#                 sizes = 'RAB,amkA,bBk,rmkR->rab'
+#             else:
+#                 sizes = 'rab,amkA,bBk,rmkR->RAB'
+#             for i in range(-bandB, bandB+1):
+#                 diag_B = tn.diagonal(coreB, i, 1, 2)
+#                 if i < 0:
+#                     Phi += oe.contract(sizes, Phi_now, coreA[:, :, -i:, :], diag_B, core[:, :, :i, :])
+#                 elif i > 0:
+#                     Phi += oe.contract(sizes, Phi_now, coreA[:, :, :-i, :], diag_B, core[:, :, i:, :])
+#                 else:
+#                     Phi += oe.contract(sizes, Phi_now, coreA, diag_B, core)
+#     else:
+#         if bandB < 0: 
+#             if order == 'bck':
+#                 sizes = 'RAB,aAk,bknB,rknR->rab'
+#             else:
+#                 sizes = 'rab,aAk,bknB,rknR->RAB'
+#             for i in range(-bandA, bandA+1):
+#                 diag_A = tn.diagonal(coreA, i, 1, 2)
+#                 if i < 0:
+#                     Phi += oe.contract(sizes, Phi_now, diag_A, coreB[:, :i , :, :], core[:, -i:, :, :])
+#                 elif i > 0:
+#                     Phi += oe.contract(sizes, Phi_now, diag_A, coreB[:, i:, :, :], core[:, :-i, :, :])
+#                 else:
+#                     Phi += oe.contract(sizes, Phi_now, diag_A, coreB, core)
+#         else:
+#             band = min(bandA + bandB, coreA.shape[1] - 1)
+#             band_min = min(bandA, bandB)
+#             if order == 'bck':
+#                 sizes = 'RAB,aAk,bBk,rRk->rab'
+#             else:
+#                 sizes = 'rab,aAk,bBk,rRk->RAB'
+#             for k in range(-band, band+1):
+#                 diag_core = tn.diagonal(core, k, 1, 2)
+#                 if k > 0:
+#                     b = bandA - k
+#                     d = bandB - k
+#                     for l in [*range(-min(d, bandA), 0),  *range(max(0, k-bandB), min(k, bandA)+1), *range(k+1, k+min(b, bandB)+1)]:
+#                         diag_A = tn.diagonal(coreA, l, 1, 2)
+#                         diag_B = tn.diagonal(coreB, k-l, 1, 2)
+#                         if l < k:
+#                             diag_A = diag_A[:, :, :max(l, 0)-k]
+#                         diag_B = diag_B[:, :, min(k, max(l, 0)):]
+#                         diag_core_slice = diag_core[:, :, max(-l, 0):]
+#                         if l > k:
+#                             diag_core_slice = diag_core_slice[:, :, :k-l]
+#                         Phi += oe.contract(sizes, Phi_now, diag_A, diag_B, diag_core_slice)
+#                 elif k < 0:
+#                     d = bandB + k
+#                     b = bandA + k
+#                     for l in [*range(min(k-d, -bandA), k), *range(max(k, -bandB), min(0, k+bandA)+1), *range(1, min(b, bandB)+1)]:
+#                         diag_B = tn.diagonal(coreB, l, 1, 2)
+#                         diag_A = tn.diagonal(coreA, k-l, 1, 2)
+#                         diag_A = diag_A[:, :, max(-max(l, k), 0):]
+#                         if l > k:
+#                             diag_B = diag_B[:, :, :k-min(l, 0)]
+#                         diag_core_slice = diag_core[:, :, max(0, l):]
+#                         if l < k:
+#                             diag_core_slice = diag_core_slice[:, :, :l-k]
+#                         Phi += oe.contract(sizes, Phi_now, diag_A, diag_B, diag_core_slice)
+#                 else:
+#                     for l in range(-band_min, band_min+1):
+#                         diag_A = tn.diagonal(coreA, l, 1, 2)
+#                         diag_B = tn.diagonal(coreB, -l, 1, 2)
+#                         if l > 0:
+#                             Phi += oe.contract(sizes, Phi_now, diag_A, diag_B, diag_core[:, :, :-l])
+#                         else:
+#                             Phi += oe.contract(sizes, Phi_now, diag_A, diag_B, diag_core[:, :, -l:])
+#     return Phi

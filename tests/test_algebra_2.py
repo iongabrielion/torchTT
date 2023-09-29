@@ -10,6 +10,13 @@ import numpy as np
 
 def err_rel(t, ref): return tn.linalg.norm(t-ref).numpy() / \
     tn.linalg.norm(ref).numpy() if ref.shape == t.shape else np.inf
+    
+def create_banded(a, m, A, band=1):
+    A_band = tn.zeros(a, m, m, A, dtype=tn.float64)
+    for k in range(-band, band+1):
+        diag = tn.diagonal(A_band, k, 1, 2)
+        diag += 100 * tn.rand(a, A, diag.shape[-1])
+    return A_band
 
 
 @pytest.mark.parametrize("dtype", [tn.float64, tn.complex128])
@@ -137,6 +144,23 @@ def test_amen_mv(dtype):
 
     assert ((C-Cr).norm()/Cr.norm()) < 1e-11
 
+    bands_A = [1, 1, 1]
+    A = tntt.randn([(128, 128), (32, 32), (32, 32)], [1, 20, 5, 1], dtype=tn.float64)
+    x = tntt.randn([128, 32, 32], [1, 4, 13, 1], dtype=tn.float64)
+    for i in range(len(A.cores)):
+        A_core = A.cores[i]
+        A.cores[i] = create_banded(A_core.shape[0], A_core.shape[1], A_core.shape[-1], bands_A[i])
+    
+    yr = 25 * A @ x
+    
+    A = A + A + A + A + A
+    x = x + x + x + x + x
+    
+    y = tntt.amen_mv(A, x)
+    assert ((y-yr).norm()/yr.norm()) < 1e-11
+    y = tntt.amen_mv(A, x, bandsA=bands_A)
+    assert ((y-yr).norm()/yr.norm()) < 1e-11
+
 @pytest.mark.parametrize("dtype", [tn.float64])
 def test_amen_mm(dtype):
     """
@@ -153,6 +177,29 @@ def test_amen_mm(dtype):
 
     C = tntt.amen_mm(A, B)
 
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+    
+    bands_A = [2, 1, 0]
+    bands_B = [3, 2, 0]
+    A = tntt.random([(128, 128), (32, 32), (16, 16)], [1, 2, 20, 1])
+    B = tntt.random([(128, 128), (32, 32), (16, 16)], [1, 20, 3, 1])
+    for i in range(len(A.cores)):
+        A_core = A.cores[i]
+        B_core = B.cores[i]
+        A.cores[i] = create_banded(A_core.shape[0], A_core.shape[1], A_core.shape[-1], bands_A[i])
+        B.cores[i] = create_banded(B_core.shape[0], B_core.shape[1], B_core.shape[-1], bands_B[i])
+    Cr = 25 * A @ B
+    
+    A = A + A + A + A + A
+    B = B + B + B + B + B
+        
+    C = tntt.amen_mm(A, B)
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+    C = tntt.amen_mm(A, B, bandsA=bands_A)
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+    C = tntt.amen_mm(A, B, bandsB=bands_B)
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+    C = tntt.amen_mm(A, B, bandsA=bands_A, bandsB=bands_B)
     assert ((C-Cr).norm()/Cr.norm()) < 1e-11
 
 
