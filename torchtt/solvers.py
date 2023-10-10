@@ -22,7 +22,6 @@ except:
         "\x1B[33m\nC++ implementation not available. Using pure Python.\n\033[0m")
     _flag_use_cpp = False
 
-
 def cpp_enabled():
     """
     Is the C++ backend enabled?
@@ -32,39 +31,6 @@ def cpp_enabled():
     """
     return _flag_use_cpp
 
-#def _local_product(Phi_right, Phi_left, coreA, core, shape, bandA=-1):
-#    """
-#    Compute local matvec product
-#
-#    Args:
-#        Phi (torch.tensor): right tensor of shape r x R x r.
-#        Psi (torch.tensor): left tensor of shape lp x Rp x lp.
-#        coreA (torch.tensor): current core of A, shape is rp x N x N x r.
-#        x (torch.tensor): the current core of x, shape is rp x N x r.
-#        shape (torch.Size): the shape of x. 
-#        bandA (int): if positive specifies number of diagonals in the matrix. 0 means diagonal structure, 1 means tridiagonal, ...
-#
-#    Returns:
-#        torch.tensor: the reuslt.
-#    """
-#
-#    if bandA < 0:
-#        w = oe.contract('lsr,smnS,LSR,rnR->lmL',
-#                        Phi_left, coreA, Phi_right, core)
-#    else:
-#        w = 0
-#        for i in range(-bandA, bandA+1):
-#            tmp = tn.diagonal(coreA, i, 1, 2)
-#            tmp = tnf.pad(tmp, ((i) if i > 0 else 0,
-#                          abs(i) if i < 0 else 0, 0, 0, 0, 0))
-#            tmp = oe.contract('lsr,sSm,LSR,rmR->lmL',
-#                              Phi_left, tmp, Phi_right, core)
-#            if i < 0:
-#                tmp = tnf.pad(tmp[:, :i, :], (0, 0, -i, 0, 0, 0))
-#            else:
-#                tmp = tnf.pad(tmp[:, i:, :], (0, 0, 0, i, 0, 0))
-#            w += tmp
-#    return w
 def _local_product(Phi_right, Phi_left, coreA, core, bandA=-1):
      """
      Compute local matvec product
@@ -173,7 +139,7 @@ class _LinearOp():
     def apply_prec(self, x):
         if self.prec == 'c':
             # no improvement using opt_einsum
-            y = tn.einsum('rnR,rRmn->rmR', x, self.J)
+            y = tn.einsum('rRmn, rnR->rmR', self.J, x)
             return y
         elif self.prec == 'r':
             y = tn.einsum('rnR,rmLnR->rmL', x, self.J)
@@ -183,16 +149,9 @@ class _LinearOp():
         x = x.reshape(self.shape)
         if self.prec == None or not apply_prec:
             if self.band_diagonal >= 0:
-                tmp = tn.tensordot(x, self.Phi_right, ([2], [2])) # rnR,LSR-> rnLS
-                tmp = tn.tensordot(self.Phi_left, tmp, ([2], [0])) # lsr,rnLS-> lsnLS
-                tmp = tn.einsum('ksSn,lsnLS->klnL', self.bands, tmp)
-                #tmp = tn.einsum('lsr,ksSn,LSR,rnR->klnL', self.Phi_left, self.bands, self.Phi_right, x)
-                w = tmp[self.band_diagonal, :, :, :]
-                for i in range(1, self.band_diagonal+1):
-                    w[:, :-i, :] += tmp[i + self.band_diagonal, :, i:, :]
-                for i in range(-self.band_diagonal, 0):
-                    w[:, -i:, :] += tmp[i + self.band_diagonal, :, :i, :]
-                
+                tmp = tn.einsum('lsr,ksSn,LSR,rnR->klnL', self.Phi_left, self.bands, self.Phi_right, x)
+                w = tn.sum(tn.stack([tnf.pad(tmp[i + self.band_diagonal, :, i:, :], (0, 0, 0, i)) for i in range(0, self.band_diagonal+1)] + 
+                                        [tnf.pad(tmp[i + self.band_diagonal, :, :i, :], (0, 0, -i, 0)) for i in range(-self.band_diagonal, 0)]),                                 axis=0)
             else:
                 w = tn.tensordot(x, self.Phi_left, ([0], [2])) # rnR,lsr-> nRls
                 w = tn.tensordot(w, self.coreA, ([0, 3], [2, 0])) # nRls,smnS->RlmS
@@ -214,17 +173,17 @@ class _LinearOp():
             else:
                 y = self.apply_prec(x)
                 if self.band_diagonal >= 0:
-                    tmp = tn.tensordot(y, self.Phi_right, ([2], [2])) # rnR,LSR-> rnLS
-                    tmp = tn.tensordot(self.Phi_left, tmp, ([2], [0])) # lsr,rnLS-> lsnLS
-                    tmp = tn.einsum('ksSn,lsnLS->klnL', self.bands, tmp)
-                    #tmp = tn.einsum('lsr,ksSn,LSR,rnR->klnL', self.Phi_left, self.bands, self.Phi_right, y)
+                    # tmp = tn.tensordot(y, self.Phi_right, ([2], [2])) # rnR,LSR-> rnLS
+                    # tmp = tn.tensordot(self.Phi_left, tmp, ([2], [0])) # lsr,rnLS-> lsnLS
+                    # tmp = tn.einsum('ksSn,lsnLS->klnL', self.bands, tmp)
+                    tmp = tn.einsum('lsr,ksSn,LSR,rnR->klnL', self.Phi_left, self.bands, self.Phi_right, y)
                     w = tn.sum(tn.stack([tnf.pad(tmp[i + self.band_diagonal, :, i:, :], (0, 0, 0, i)) for i in range(0, self.band_diagonal+1)] + 
-                                        [tnf.pad(tmp[i + self.band_diagonal, :, :i, :], (0, 0, -i, 0)) for i in range(-self.band_diagonal, 0)]),                                 axis=0)               
+                                        [tnf.pad(tmp[i + self.band_diagonal, :, :i, :], (0, 0, -i, 0)) for i in range(-self.band_diagonal, 0)]),                                 axis=0)
                 else:
-                    # w = tn.tensordot(y, self.Phi_left, ([0], [2])) # rnR,lsr-> nRls
-                    # w = tn.tensordot(w, self.coreA, ([0, 3], [2, 0])) # nRls,smnS->RlmS
-                    # w = tn.tensordot(w, self.Phi_right, ([0, 3], [2, 1]))  # RlmS,LSR->lmL
-                    w = tn.einsum('lsr,smnS,LSR,rnR->lmL', self.Phi_left, self.coreA, self.Phi_right, y)
+                    w = tn.tensordot(y, self.Phi_left, ([0], [2])) # rnR,lsr-> nRls
+                    w = tn.tensordot(w, self.coreA, ([0, 3], [2, 0])) # nRls,smnS->RlmS
+                    w = tn.tensordot(w, self.Phi_right, ([0, 3], [2, 1]))  # RlmS,LSR->lmL
+                    #w = tn.einsum('lsr,smnS,LSR,rnR->lmL', self.Phi_left, self.coreA, self.Phi_right, y)
 
         else:
             raise Exception('Preconditioner '+str(self.prec)+' not defined.')
@@ -314,6 +273,7 @@ def amen_solve(A, b, nswp=22, x0=None, eps=1e-10, rmax=32768, max_full=500, kick
 
 
 def _amen_solve_python(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_full=500, kickrank=4, kick2=0, trunc_norm='res', local_solver=1, local_iterations=40, resets=2, verbose=False, preconditioner=None, use_single_precision=False, bandsA=None):
+    #print("AMEN SOLVE")
     if verbose:
         time_total = datetime.datetime.now()
 
@@ -427,7 +387,6 @@ def _amen_solve_python(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_full=50
             x_cores[k-1] = core_prev[:]
 
             # update phis (einsum)
-            # print(x_cores[k].shape,A.cores[k].shape,x_cores[k].shape)
             Phis[k] = _compute_phi_A('bck', Phis[k+1], x_cores[k], A.cores[k], x_cores[k], bandsA[k])
             Phis_b[k] = _compute_phi_bck_rhs(
                 Phis_b[k+1], b.cores[k], x_cores[k])
@@ -522,23 +481,8 @@ def _amen_solve_python(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_full=50
                     res_new = tn.linalg.norm(Op.matvec(solution_now.to(
                         tn.float32), False).to(dtype)-rhs)/norm_rhs
                 else:
-                    # Op_not_band = _LinearOp(Phis[k], Phis[k+1],
-                    #                A.cores[k], shape_now, preconditioner, bandsA[k])
                     Op = _LinearOp(Phis[k], Phis[k+1],
                                    A.cores[k], shape_now, preconditioner, bandsA[k])
-                    
-                    # print("Linear Op comparioson: ")
-                    # x = tn.rand(Phis[k].shape[-1], A.cores[k].shape[1], Phis[k+1].shape[-1], dtype=A.cores[k].dtype)
-                    
-                    # time = datetime.datetime.now()
-                    # Op_not_band.matvec(x)
-                    # time = datetime.datetime.now() - time
-                    # print("Not banded: ", time)
-                    
-                    # time = datetime.datetime.now()
-                    # Op.matvec(x)
-                    # time = datetime.datetime.now() - time
-                    # print("Banded: ", time)
 
                     # solution_now, flag, nit, res_new = BiCGSTAB_reset(Op, rhs,previous_solution[:], eps_local, local_iterations)
                     eps_local = real_tol * norm_rhs
@@ -726,57 +670,6 @@ def _amen_solve_python(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_full=50
     x = torchtt.TT(x_cores)
 
     return x
-
-
-def _compute_phi_bck_A(Phi_now, core_left, core_A, core_right):
-    """
-    Compute the phi backwards for the form dot(left,A @ right)
-
-    Args:
-        Phi_now (torch.tensor): The current phi. Has shape r1_k+1 x R_k+1 x r2_k+1
-        core_left (torch.tensor): the core on the left. Has shape r1_k x N_k x r1_k+1 
-        core_A (torch.tensor): the core of the matrix. Has shape  R_k x N_k x N_k x R_k
-        core_right (torch.tensor): the core to the right. Has shape r2_k x N_k x r2_k+1 
-
-    Returns:
-        torch.tensor: The following phi (backward). Has shape r1_k x R_k x r2_k
-    """
-
-    # Phip = tn.einsum('ijk,klm->ijlm',core_right,Phi_now)
-    # Phipp = tn.einsum('ijkl,abjk->ilba',Phip,core_A)
-    # Phi = tn.einsum('ijkl,akj->ila',Phipp,core_left)
-    Phi = oe.contract('LSR,lML,sMNS,rNR->lsr', Phi_now,
-                      core_left, core_A, core_right)
-    # print(oe.contract_path('LSR,lML,sMNS,rNR->lsr',Phi_now,core_left,core_A,core_right))
-    return Phi
-
-
-def _compute_phi_fwd_A(Phi_now, core_left, core_A, core_right):
-    """
-    Compute the phi forward for the form dot(left,A @ right)
-
-    Args:
-        Phi_now (torch.tensor): The current phi. Has shape r1_k x R_k x r2_k
-        core_left (torch.tensor): the core on the left. Has shape r1_k x N_k x r1_k+1 
-        core_A (torch.tensor): the core of the matrix. Has shape  R_k x N_k x N_k x R_k
-        core_right (torch.tensor): the core to the right. Has shape r2_k x N_k x r2_k+1 
-
-    Returns:
-        torch.tensor: The following phi (backward). Has shape r1_k+1 x R_k+1 x r2_k+1
-    """
-    # Psip = tn.einsum('ijk,kbc->ijbc', Phi_now, core_left)  # shape is rk-1 x Rk-1 x Nk x rk
-    # Psipp = tn.einsum('ijkl,aijd->klad', core_A, Psip)  # shape is nk x Rk x rk-1 x rk
-    # Phi_next= tn.einsum('ijk,jbid->kbd',core_right,Psipp) # shape is rk x  Rk x rk
-    # tme1 = datetime.datetime.now()
-    # Phi_next = tn.einsum('lsr,lML,sMNS,rNR->LSR',Phi_now,core_left,core_A,core_right)
-    # tme1 = datetime.datetime.now() - tme1
-    # tme2 = datetime.datetime.now()
-    Phi_next = oe.contract('lsr,lML,sMNS,rNR->LSR',
-                           Phi_now, core_left, core_A, core_right)
-    # print(oe.contract_path('lsr,lML,sMNS,rNR->LSR',Phi_now,core_left,core_A,core_right))
-    # tme2 = datetime.datetime.now() - tme2
-    # print('\n>>>>>>>>>>>>>>>>>>>>>>>>>>Time1 ',tme1,' time 2', tme2)
-    return Phi_next
 
 def _compute_phi_A(order, Phi_now, core_left, coreA, core_right, bandA=-1):
     """
