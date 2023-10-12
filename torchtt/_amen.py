@@ -12,7 +12,7 @@ from torchtt._iterative_solvers import BiCGSTAB_reset, gmres_restart
 import opt_einsum as oe
 import torch.nn.functional as tnf
 from .errors import *
-
+from ._amen_approx import amen_approx, mv_local_op
 
 try:
     import torchttcpp
@@ -202,7 +202,9 @@ def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, v
         # cores = torchttcpp.amen_solve(A_cores, B_cores, x_cores, b.N, A.R, b.R, x_R, nswp, eps, rmax, max_full, kickrank, kick2, local_iterations, resets, verbose, prec)
         # return torchtt.TT(list(cores))
     else:
-        return _amen_mm_python(A.cores, [c[:, :, None, :] for c in b.cores], A.M, [1]*len(A.M), A.N, False, nswp, x0.cores if x0 is not None else None, x0.R if x0 is not None else None, eps, rmax, kickrank, kick2, verbose, bandsA)
+        op = mv_local_op(A, b, A.M, A.N, kickrank+kick2>0)
+        return amen_approx(op, eps, None, A.M, x0, None, nswp, kickrank, kick2, 2 if verbose else 0, True, False, A.cores[0].device)
+        # return _amen_mm_python(A.cores, [c[:, :, None, :] for c in b.cores], A.M, [1]*len(A.M), A.N, False, nswp, x0.cores if x0 is not None else None, x0.R if x0 is not None else None, eps, rmax, kickrank, kick2, verbose, bandsA)
 
 
 def amen_mm(A, B, nswp=22, X0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False, bandsA=None, bandsB=None):
