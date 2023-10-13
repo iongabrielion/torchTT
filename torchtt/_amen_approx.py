@@ -8,7 +8,7 @@ import datetime
 from torchtt._decomposition import QR, SVD, lr_orthogonal, rl_orthogonal
 from torchtt._iterative_solvers import BiCGSTAB_reset, gmres_restart
 import opt_einsum as oe
-
+from ._amen_approx_contractors import mv_local_op, mv_multiple_local_op, mvm_multiple_local_op
 
 def _reshape(a, shape):
     return _np.reshape(a, shape, order='F')
@@ -128,7 +128,14 @@ def amen_approx(contractor, tol, shape_out_M, shape_out_N, y=None, z=None, nswp=
     swp = 1
     max_dx = 0
 
+    if verb > 0:
+        tme_total = datetime.datetime.now()
+
     while swp <= nswp:
+        if (verb > 0):
+            if ((direct < 0) and (i == d - 1)) or ((direct > 0) and (i == 0)):
+                print("Sweep %d, direction %d"%(swp, direct))
+                tme_swp = datetime.datetime.now()
         # Project the MatVec generating vector
         cry = contractor.b_fun(i, 'y', 'y')
 
@@ -274,14 +281,13 @@ def amen_approx(contractor, tol, shape_out_M, shape_out_N, y=None, z=None, nswp=
                 phizy[i] = compute_phiy_rl(phizy[i+1], cores_z[i], cores_y[i])
 
         if (verb > 1):
-            print('amen-mv: swp=[%d,%d], dx=%.3e, r=%d, |y|=%.3e, |z|=%.3e' %
-                  (swp, i, dx, r, tn.linalg.norm(cry), nrmz))
+            print('\t\tcore %d, dx %e, rank %d:' %(i, dx, r))
 
         # Stopping or reversing
         if ((direct > 0) and (i == d - 1)) or ((direct < 0) and (i == 0)):
             if (verb > 0):
-                print('amen-mv: swp=%d{%d}, max_dx=%.3e, max_r=%d' %
-                      (swp, (1 - direct) // 2, max_dx, max(ry)))
+                tme_swp = datetime.datetime.now() - tme_swp
+                print('\tfinished after %s, max dx=%.3e, max rank=%d' %(str(tme_swp), max_dx, max(ry)))
             if ((max_dx < tol) or (swp == nswp)) and (direct > 0):
                 break
             else:
@@ -290,6 +296,7 @@ def amen_approx(contractor, tol, shape_out_M, shape_out_N, y=None, z=None, nswp=
                     cry, (ry[i], M[i], N[i], ry[i + 1]) if ttm else (ry[i], N[i], ry[i + 1]))
                 if (direct > 0):
                     swp = swp + 1
+                    
             max_dx = 0
             direct = -direct
         else:
@@ -303,6 +310,10 @@ def amen_approx(contractor, tol, shape_out_M, shape_out_N, y=None, z=None, nswp=
     for i in range(d):
         cores_y[i] = cores_y[i] * nrms
 
+    if verb > 0:
+        tme_total = datetime.datetime.now() - tme_total
+        print("Finished in %s"%(str(tme_total)))
+        print()
     return tntt.TT(cores_y)
 
 
@@ -342,74 +353,3 @@ def compute_phiy_rl(phi_prev, z, y):
         return oe.contract('zmnZ,YZ,ymnY->yz', z, phi_prev, y)
 
 
-class mv_local_op():
-
-    def __init__(self, A, x, M, N, has_z=True):
-
-        self.A = A
-        self.x = x
-        self.M = M
-        self.N = N
-        self.has_z = has_z
-
-        self.phis_y = [tn.ones([1, 1, 1], device=A.cores[0].device, dtype=A.cores[0].dtype)] + \
-            [None]*(len(M)-1) + [tn.ones([1, 1, 1], device=A.cores[0].device, dtype=A.cores[0].dtype)]
-        if has_z:
-            self.phis_z = [tn.ones([1, 1, 1], device=A.cores[0].device, dtype=A.cores[0].dtype)] + [None]*(
-                len(M)-1) + [tn.ones([1, 1, 1], device=A.cores[0].device, dtype=A.cores[0].dtype)]
-
-
-    def b_fun(self, k, first, second):
-        return oe.contract('yax,YAX,amnA,xnX->ymY', self.phis_y[k] if first == 'y' else self.phis_z[k], self.phis_y[k+1] if second == 'y' else self.phis_z[k+1], self.A.cores[k], self.x.cores[k])
-
-    def update_phi_z(self, z, k, mode, norm, return_norm):
-
-        if mode == 'rl':
-            phi = oe.contract(
-                'ZAX,amnA,xnX,zmZ->zax', self.phis_z[k+1], self.A.cores[k], self.x.cores[k], z)
-            if return_norm:
-                nrm_phi = tn.linalg.norm(phi)
-                norm *= nrm_phi
-            else:
-                nrm_phi = 1
-            if norm != 1:
-                phi = phi / norm
-            self.phis_z[k] = phi.clone()
-        else:
-            phi = oe.contract('zax,zmZ,amnA,xnX->ZAX',
-                              self.phis_z[k], z, self.A.cores[k], self.x.cores[k])
-            if return_norm:
-                nrm_phi = tn.linalg.norm(phi)
-                norm *= nrm_phi
-            else:
-                nrm_phi = 1
-            if norm != 1:
-                phi = phi / norm
-            self.phis_z[k+1] = phi.clone()
-        return nrm_phi
-
-    def update_phi_y(self, y, k, mode, norm, return_norm):
-
-        if mode == 'rl':
-            phi = oe.contract(
-                'YAX,amnA,xnX,ymY->yax', self.phis_y[k+1], self.A.cores[k], self.x.cores[k], y)
-            if return_norm:
-                nrm_phi = tn.linalg.norm(phi)
-                norm *= nrm_phi
-            else:
-                nrm_phi = 1
-            if norm != 1:
-                phi = phi / norm
-            self.phis_y[k] = phi.clone()
-        else:
-            phi = oe.contract('yax,ymY,amnA,xnX->YAX',
-                              self.phis_y[k], y, self.A.cores[k], self.x.cores[k])
-            if return_norm:
-                nrm_phi = tn.linalg.norm(phi)
-                norm *= nrm_phi
-            else:
-                nrm_phi = 1
-            if norm != 1:
-                phi = phi / norm
-            self.phis_y[k+1] = phi.clone()
-        return nrm_phi

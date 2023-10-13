@@ -12,7 +12,7 @@ from torchtt._iterative_solvers import BiCGSTAB_reset, gmres_restart
 import opt_einsum as oe
 import torch.nn.functional as tnf
 from .errors import *
-from ._amen_approx import amen_approx, mv_local_op
+from ._amen_approx import amen_approx, mv_local_op, mv_multiple_local_op, mvm_multiple_local_op
 
 try:
     import torchttcpp
@@ -155,6 +155,43 @@ def _local_AB(Phi_left, Phi_right, coreA, coreB, bandA=-1, bandB=-1):
                             [tnf.pad(tmp[i + bandA, :, :i, :, :], (0, 0, 0, 0, -i, 0)) for i in range(-bandA, 0)]), axis=0)
     return w
 
+def amen_mvm(A, x, B, nswp=22, y0=None, eps=1e-10, rmax=999999, kickrank=4, kick2=0, verbose=False, use_cpp=True):
+    """
+    Approxmate y = A[0] @ totchtt.diag(x[0]) @ B[0] + A[1] @ totchtt.diag(x[1]) @ B[1] + ...
+
+    Args:
+        A (list[torchtt.TT]): the TT matrices.
+        x (list[torchtt.TT]): the TT tensors.
+        B (list[torchtt.TT]): the TT matrices.
+        nswp (int, optional): number of sweeps. Defaults to 22.
+        y0 (torchtt.TT, optional): initial guess. Defaults to None.
+        eps (float, optional): relative tolerance. Defaults to 1e-10.
+        rmax (int, optional): maximum rank. Defaults to 1024.
+        kickrank (int, optional): rank enrichment. Defaults to 4.
+        kick2 (int, optional): rank of random component. Defaults to 0.
+        verbose (bool, optional): discplay extra info to console. Defaults to False.
+        use_cpp (bool, optional): use the C++ version (not implemented yet). Defaults to True.
+
+    Returns:
+        torchtt.TT: the result.
+    """
+        
+    use_cpp = False
+    if use_cpp and _flag_use_cpp:
+        if y0 == None:
+            x_cores = []
+            x_R = [1]*(1+len(A.N))
+        else:
+            x_cores = y0.cores
+            x_R = y0.R
+
+        # cores = torchttcpp.amen_solve(A_cores, B_cores, x_cores, b.N, A.R, b.R, x_R, nswp, eps, rmax, max_full, kickrank, kick2, local_iterations, resets, verbose, prec)
+        # return torchtt.TT(list(cores))
+    else:
+        op = mvm_multiple_local_op(A, x, B, A[0].M, B[0].N, kickrank+kick2>0)
+        return amen_approx(op, eps, None, A[0].M, B[0].N, None, nswp, kickrank, kick2, 2 if verbose else 0, True, False, A.cores[0].device)
+
+    
 def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False, use_cpp=True, bandsA=None):
     """
     Compute the matrix vector product between a TTM and a TT.
@@ -162,7 +199,7 @@ def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, v
 
     Args:
         A (torchtt.TT): the matrix in TT.
-        b (torchtt.TT): the tensor TT.
+        b (torchtt.TT | list[torchtt.TT]): the tensor TT or a list of tensors.
         nswp (int, optional): number of sweeps. Defaults to 22.
         x0 (torchtt.TT, optional): initial guess. In None is provided the initial guess is a ones tensor. Defaults to None.
         eps (float, optional): relative residual. Defaults to 1e-10.
@@ -183,12 +220,12 @@ def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, v
         torchtt.TT: the approximation of the solution in TT format.
     """
     # perform checks of the input data
-    if not (isinstance(A, torchtt.TT) and isinstance(b, torchtt.TT)):
+    if not (isinstance(A, torchtt.TT) and (isinstance(b, torchtt.TT) or isinstance(b, list))):
         raise InvalidArguments('A and b must be TT instances.')
-    if not (A.is_ttm and not b.is_ttm):
+    if not A.is_ttm:
         raise IncompatibleTypes('A must be TT-matrix and b must be vector.')
-    if A.N != b.N:
-        raise ShapeMismatch('Dimension mismatch.')
+    #if A.N != b.N:
+    #    raise ShapeMismatch('Dimension mismatch.')
 
     use_cpp = False
     if use_cpp and _flag_use_cpp:
@@ -202,7 +239,10 @@ def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, v
         # cores = torchttcpp.amen_solve(A_cores, B_cores, x_cores, b.N, A.R, b.R, x_R, nswp, eps, rmax, max_full, kickrank, kick2, local_iterations, resets, verbose, prec)
         # return torchtt.TT(list(cores))
     else:
-        op = mv_local_op(A, b, A.M, A.N, kickrank+kick2>0)
+        if isinstance(b, list):
+            op = mv_multiple_local_op(A, b, A.M, A.N, kickrank+kick2>0)
+        else:
+            op = mv_local_op(A, b, A.M, A.N, kickrank+kick2>0)
         return amen_approx(op, eps, None, A.M, x0, None, nswp, kickrank, kick2, 2 if verbose else 0, True, False, A.cores[0].device)
         # return _amen_mm_python(A.cores, [c[:, :, None, :] for c in b.cores], A.M, [1]*len(A.M), A.N, False, nswp, x0.cores if x0 is not None else None, x0.R if x0 is not None else None, eps, rmax, kickrank, kick2, verbose, bandsA)
 

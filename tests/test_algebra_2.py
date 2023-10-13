@@ -160,6 +160,22 @@ def test_amen_mv(dtype):
     assert ((y-yr).norm()/yr.norm()) < 1e-11
     y = tntt.amen_mv(A, x, bandsA=bands_A)
     assert ((y-yr).norm()/yr.norm()) < 1e-11
+    
+@pytest.mark.parametrize("dtype", [tn.float64])
+def test_amen_mv_multiple(dtype):
+    """
+    Test the AMEn matvec.
+    """
+
+    A = tntt.randn([(3, 4), (5, 6), (7, 8), (2, 3)], [1, 2, 2, 3, 1], dtype=dtype)
+    xs = []
+    Cr = 0
+    for i in range(8):
+        xs.append(tntt.randn([4, 6, 8, 3], [1, 4, 3, 3, 1], dtype=dtype))
+        Cr = Cr + A@xs[-1]
+    C = tntt.amen_mv(A, xs)
+
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
 
 @pytest.mark.parametrize("dtype", [tn.float64])
 def test_amen_mm(dtype):
