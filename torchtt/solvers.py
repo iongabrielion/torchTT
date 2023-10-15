@@ -31,7 +31,7 @@ def cpp_enabled():
     """
     return _flag_use_cpp
 
-def _local_product(Phi_right, Phi_left, operands_cores, x, operands_bands):
+def _local_product(Phi_right, Phi_left, Summ_data, x):
     """
     Compute local matvec product
     
@@ -46,59 +46,27 @@ def _local_product(Phi_right, Phi_left, operands_cores, x, operands_bands):
      torch.tensor: the result.
     """
     w = tn.zeros(Phi_left.shape[0], x.shape[1], Phi_right.shape[0], device=x.device, dtype=x.dtype)
-    s_beg = 0
-    S_beg = 0
-    first = (Phi_left.shape[1] == 1)
-    last = (Phi_right.shape[1] == 1)
-    for core, band in zip(operands_cores, operands_bands):
-        s_end = s_beg + core.shape[0]
-        S_end = S_beg + core.shape[-1]
+    for data, band, s_beg, s_end, S_beg, S_end in Summ_data:
         if band < 0:
+            # data is a full core
             w += oe.contract('lsr,smnS,LSR,rnR->lmL',
-                                 Phi_left[:, s_beg:s_end, :], core, Phi_right[:, S_beg:S_end, :], x)
+                                 Phi_left[:, s_beg:s_end, :], data, Phi_right[:, S_beg:S_end, :], x)
         else:
-            diagonals = tn.stack([tnf.pad(tn.diagonal(core, i, 1, 2), (0, -i)) for i in range(-band, 1)] +
-                                 [tnf.pad(tn.diagonal(core, i, 1, 2), (i, 0)) for i in range(1, band+1)])
-            tmp = oe.contract('lsr,ksSm,LSR,rmR->klmL', Phi_left[:, s_beg:s_end, :], diagonals, Phi_right[:, S_beg:S_end, :], x)
+            # data is core diagonals
+            tmp = oe.contract('lsr,ksSm,LSR,rmR->klmL', Phi_left[:, s_beg:s_end, :], data, Phi_right[:, S_beg:S_end, :], x)
             w += tn.sum(tn.stack([tnf.pad(tmp[i + band, :, :i, :], (0, 0, -i, 0)) for i in range(-band, 0)] + 
                                  [tnf.pad(tmp[i + band, :, i:, :], (0, 0, 0, i)) for i in range(0, band+1)]), axis=0)
-        s_beg = s_end if not first else 0
-        S_beg = S_end if not last else 0
     return w
 
 
 class _LinearOp():
-    def __init__(self, Phi_left, Phi_right, operands_cores, A_shape, shape, prec, operands_bands, first=False, last=False):
+    def __init__(self, Phi_left, Phi_right, Summ_data, A_shape, shape, prec):
         self.Phi_left = Phi_left
         self.Phi_right = Phi_right
         self.A_shape = A_shape
         self.shape = shape
         self.prec = prec
-        self.operands_bands = operands_bands
-        self.data = []
-        self.s_begs = [0] * len(operands_cores)
-        self.s_ends = [0] * len(operands_cores)
-        self.S_begs = [0] * len(operands_cores)
-        self.S_ends = [0] * len(operands_cores)
-        for i in range((len(operands_cores))):
-            core = operands_cores[i]
-            self.s_ends[i] = self.s_begs[i] + core.shape[0]
-            self.S_ends[i] = self.S_begs[i] + core.shape[-1]
-            if (i < len(operands_cores) - 1):
-                if not first:
-                    self.s_begs[i+1] = self.s_ends[i]
-                if not last:
-                    self.S_begs[i+1] = self.S_ends[i]
-            
-        for core, band in zip(operands_cores, operands_bands):
-            if band >= 0:
-                self.data.append(tn.stack([tnf.pad(tn.diagonal(core, i, 1, 2), (0, -i)) for i in range(-band, 0)] + 
-                                          [tnf.pad(tn.diagonal(core, i, 1, 2), (i, 0)) for i in range(0, band+1)]))
-            else:
-                self.data.append(core)
-        print(first, last)
-        print(self.s_begs, self.s_ends)
-        print(self.S_begs, self.S_ends)
+        self.summ_data = Summ_data
             
         # if prec == 'c':
         #     Jl = tn.zeros(Phi_left.shape[-1], A_shape[1], A_shape[2], A.shape[-1], dtype=Phi_left.dtype, device = Phi_left.device)
@@ -187,13 +155,15 @@ class _LinearOp():
         if self.prec == None or not apply_prec:
             tmp = tn.tensordot(x, self.Phi_left, ([0], [2])) # rnR,lsr-> nRls
             w = tn.zeros(tmp.shape[1], tmp.shape[2], self.A_shape[1], self.A_shape[-1], dtype=tmp.dtype, device=tmp.device)
-            for data, band, s_beg, s_end, S_beg, S_end in zip(self.data, self.operands_bands, self.s_begs, self.s_ends, self.S_begs, self.S_ends):
+            for data, band, s_beg, s_end, S_beg, S_end in self.summ_data:
                 if band >= 0:
+                    # data is core diagonals
                     w = 0
                     # tmp = tn.einsum('lsr,ksSn,LSR,rnR->klnL', self.Phi_left, self.bands, self.Phi_right, x)
                     # w = tn.sum(tn.stack([tnf.pad(tmp[i + self.band_diagonal, :, i:, :], (0, 0, 0, i)) for i in range(0, self.band_diagonal+1)] + 
                     #                         [tnf.pad(tmp[i + self.band_diagonal, :, :i, :], (0, 0, -i, 0)) for i in range(-self.band_diagonal, 0)]),                                 axis=0)
                 else:
+                    # data is a full core
                     w[:, :, :, S_beg:S_end] += tn.tensordot(tmp[:, :, :, s_beg:s_end], data, ([0, 3], [2, 0])) # nRls,smnS->RlmS
             w = tn.tensordot(w, self.Phi_right, ([0, 3], [2, 1]))  # RlmS,LSR->lmL
             #w = tn.einsum('lsr,smnS,LSR,rnR->lmL', self.Phi_left, self.coreA, self.Phi_right, x)
@@ -334,12 +304,16 @@ def amen_solve(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=32768, max_full=50
         return torchtt.TT(list(cores))
         return -1
     else:
-        bandsA = None
-        return _amen_solve_python(Matrices, b, nswp, x0, eps, rmax, max_full, kickrank, kick2, trunc_norm, local_solver, local_iterations, resets, verbose, preconditioner, use_single_precision, bandsA, sum_direct)
+        if bandsMatrices == None:
+            bandsMatrices = [[-1] * len(Matrices[0].N)] * len(Matrices)
+        else:
+            assert(len(Matrices) == len(bandsMatrices))
+                
+        return _amen_solve_python(Matrices, b, nswp, x0, eps, rmax, max_full, kickrank, kick2, trunc_norm, local_solver, local_iterations, resets, verbose, preconditioner, use_single_precision, np.array(bandsMatrices), sum_direct)
 
 
-def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_full=500, kickrank=4, kick2=0, trunc_norm='res', local_solver=1, local_iterations=40, resets=2, verbose=False, preconditioner=None, use_single_precision=False, bandsA=None, sum_direct=False):
- #####
+def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_full=500, kickrank=4, kick2=0, trunc_norm='res', local_solver=1, local_iterations=40, resets=2, verbose=False, preconditioner=None, use_single_precision=False, bandsMatrices=None, sum_direct=False):
+    #####
     if sum_direct:
         A = Matrices[0]
         for i in range(1, len(Matrices)):
@@ -353,9 +327,34 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
 
     N = b.N
     d = len(N)
-####
-    bandsA = [-1] * len(Matrices)
-####
+
+    Summ_data = []
+
+    for k in range(d):
+        #k_th_cores = [Matrices[i].cores[k] for i in range(len(Matrices))]
+        k_th_cores = []
+        s_begs = [0] * len(Matrices)
+        s_ends = [1] * len(Matrices)
+        S_begs = [0] * len(Matrices)
+        S_ends = [1] * len(Matrices)
+        for i in range((len(Matrices))):
+            core = Matrices[i].cores[k]
+            s_ends[i] = s_begs[i] + core.shape[0]
+            S_ends[i] = S_begs[i] + core.shape[-1]
+            if (i < len(Matrices) - 1):
+                if k != 0:
+                    s_begs[i+1] = s_ends[i]
+                if k != (d - 1):
+                    S_begs[i+1] = S_ends[i]
+            if bandsMatrices[i, k] < 0:
+                k_th_cores.append(core)
+            else:
+                k_th_cores.append(tn.stack([tnf.pad(tn.diagonal(core, i, 1, 2), (0, -i)) for i in range(-band, 1)] +
+                                 [tnf.pad(tn.diagonal(core, i, 1, 2), (i, 0)) for i in range(1, band+1)]))
+        Summ_data.append(list(zip(k_th_cores, bandsMatrices[:, k], s_begs, s_ends, S_begs, S_ends)))
+
+
+        
     cores_operands = []
     for k in range(d):
         k_th_cores = [Matrices[i].cores[k] for i in range(len(Matrices))]
@@ -366,6 +365,7 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
         A_ranks[1:-1] += np.array(Matrices[i].R)[1:-1]
     A_ranks = list(A_ranks)
     A_sizes = (Matrices[0].N).copy()
+                    
     
     if verbose:
         time_total = datetime.datetime.now()
@@ -434,7 +434,7 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
             if not last:
                 if swp > 0:
                     # shape rzp x N x rz
-                    czA = _local_product(Phiz[k+1], Phiz[k], cores_operands[k], x_cores[k], [-1] * len(Matrices))
+                    czA = _local_product(Phiz[k+1], Phiz[k], Summ_data[k], x_cores[k])
                     # shape is rzp x N x rz
                     czy = tn.einsum('br,bnB,BR->rnR',
                                     Phiz_b[k], b.cores[k], Phiz_b[k+1])
@@ -473,14 +473,8 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
             x_cores[k-1] = core_prev[:]
 
             # update phis (einsum)
-            Phis[k] = _compute_phi_A('bck', Phis[k+1], x_cores[k], cores_operands[k], 
-                                     x_cores[k], [-1] * len(Matrices), k == 0, k == (d-1))
-            tmp = _compute_phi_A('bck', Phis[k+1], x_cores[k], [Summ.cores[k],], 
-                                     x_cores[k], [-1], k == 0, k == (d-1))
-            print("k = ", k)
-            print("Diff = ", (Phis[k] - tmp).norm() / tmp.norm() )
-            Phis_b[k] = _compute_phi_bck_rhs(
-                Phis_b[k+1], b.cores[k], x_cores[k])
+            Phis[k] = _compute_phi_A('bck', Phis[k+1], x_cores[k], Summ_data[k], x_cores[k], A_ranks[k], A_ranks[k+1])
+            Phis_b[k] = _compute_phi_bck_rhs(Phis_b[k+1], b.cores[k], x_cores[k])
 
             # ... and norms
             norm = tn.linalg.norm(Phis[k])
@@ -497,8 +491,8 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
 
             # compute phis_z
             if not last:
-                Phiz[k] = _compute_phi_A('bck', Phiz[k+1], z_cores[k], cores_operands[k], 
-                                         x_cores[k],[-1] * len(Matrices), k == 0, k == (d-1)) / normA[k-1]
+                Phiz[k] = _compute_phi_A('bck', Phiz[k+1], z_cores[k], Summ_data[k], 
+                                         x_cores[k], A_ranks[k], A_ranks[k+1]) / normA[k-1]
                 Phiz_b[k] = _compute_phi_bck_rhs(
                     Phiz_b[k+1], b.cores[k], z_cores[k]) / normb[k-1]
 
@@ -576,8 +570,8 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
                     # Op = _LinearOp(Phis[k], Phis[k+1],
                     #                Summ.cores[k], shape_now, preconditioner, bandsA[k])
                     Op = _LinearOp(Phis[k], Phis[k+1],
-                                   cores_operands[k], (A_ranks[k], A_sizes[k], A_sizes[k], A_ranks[k+1]),
-                                   shape_now, preconditioner, [-1] * (len(cores_operands[k])), (k == 0), (k == (d - 1)))
+                                   Summ_data[k], (A_ranks[k], A_sizes[k], A_sizes[k], A_ranks[k+1]),
+                                   shape_now, preconditioner)
 
                     # solution_now, flag, nit, res_new = BiCGSTAB_reset(Op, rhs,previous_solution[:], eps_local, local_iterations)
                     eps_local = real_tol * norm_rhs
@@ -663,8 +657,8 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
             v = v.t()
 
             if not last:
-                czA = _local_product(Phiz[k+1], Phiz[k], cores_operands[k], tn.reshape(
-                                     u@v.t(), [rx[k], N[k], rx[k+1]]), [-1] * len(Matrices))  # shape rzp x N x rz
+                czA = _local_product(Phiz[k+1], Phiz[k], Summ_data[k], tn.reshape(
+                                     u@v.t(), [rx[k], N[k], rx[k+1]]))  # shape rzp x N x rz
 
                 # shape is rzp x N x rz
                 czy = tn.einsum('br,bnB,BR->rnR',
@@ -684,8 +678,8 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
 
             if k < d-1:
                 if not last:
-                    left_res = _local_product(Phiz[k+1], Phis[k], cores_operands[k], tn.reshape(
-                                              u@v.t(), [rx[k], N[k], rx[k+1]]), [-1] * len(Matrices))
+                    left_res = _local_product(Phiz[k+1], Phis[k], Summ_data[k], tn.reshape(
+                                              u@v.t(), [rx[k], N[k], rx[k+1]]))
                     left_b = tn.einsum(
                         'br,bmB,BR->rmR', Phis_b[k], b.cores[k]*nrmsc, Phiz_b[k+1])
                     uk = left_b - left_res  # rx_k x N_k x rz_k+1
@@ -714,10 +708,8 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
                 rx[k+1] = r
 
                 # next phis with norm correction
-                Phis[k+1] = _compute_phi_A('fwd', Phis[k], x_cores[k], [Summ.cores[k], ],
-                                           x_cores[k],[-1], k == 0, k == (d-1))
-                Phis_b[k +
-                       1] = _compute_phi_fwd_rhs(Phis_b[k], b.cores[k], x_cores[k])
+                Phis[k+1] = _compute_phi_A('fwd', Phis[k], x_cores[k], Summ_data[k], x_cores[k], A_ranks[k], A_ranks[k+1])
+                Phis_b[k+1] = _compute_phi_fwd_rhs(Phis_b[k], b.cores[k], x_cores[k])
 
                 # ... and norms
                 norm = tn.linalg.norm(Phis[k+1])
@@ -734,10 +726,8 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
 
                 # next phiz
                 if not last:
-                    Phiz[k+1] = _compute_phi_A('fwd', Phiz[k], z_cores[k], cores_operands[k], 
-                                               x_cores[k], [-1] * len(Matrices), k == 0, k == (d-1)) / normA[k]
-                    Phiz_b[k+1] = _compute_phi_fwd_rhs(
-                        Phiz_b[k], b.cores[k], z_cores[k]) / normb[k]
+                    Phiz[k+1] = _compute_phi_A('fwd', Phiz[k], z_cores[k], Summ_data[k], x_cores[k], A_ranks[k], A_ranks[k+1]) / normA[k]
+                    Phiz_b[k+1] = _compute_phi_fwd_rhs(Phiz_b[k], b.cores[k], z_cores[k]) / normb[k]
             else:
                 x_cores[k] = tn.reshape(
                     u@tn.diag(s[:r]) @ v[:r, :].t(), [rx[k], N[k], rx[k+1]])
@@ -768,7 +758,7 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
 
     return x
 
-def _compute_phi_A(order, Phi_now, core_left, operands_cores, core_right, operands_bands=None, first=False, last=False):
+def _compute_phi_A(order, Phi_now, core_left, Summ_data, core_right, s, S):
     """
     Compute the phi backwards for the form dot(left,A @ right)
 
@@ -784,45 +774,27 @@ def _compute_phi_A(order, Phi_now, core_left, operands_cores, core_right, operan
         torch.tensor: The following phi (backward).  If order == 'bck' has shape r1_k x R_k x r2_k
                                                      If order == 'fwd' has shape r1_k+1 x R_k+1 x r2_k+1
     """
-    # if coreA.shape[1] != coreA.shape[2]:
-    #     bandA = -1
-
-    s_beg = 0
-    S_beg = 0
-    s = 0
-    S = 0
-    for core in operands_cores:
-        s += core.shape[0]
-        S += core.shape[-1]
-    if first:
-        s = 1
-    if last:
-        S = 1
     if order == 'bck':
          Phi = tn.zeros(core_left.shape[0], s, core_right.shape[0], device=core_left.device, dtype=core_left.dtype)
     elif order == 'fwd':
         Phi = tn.zeros(core_left.shape[-1], S, core_right.shape[-1], device=core_left.device, dtype=core_left.dtype)
-    for core, band in zip(operands_cores, operands_bands):
-        s_end = s_beg + core.shape[0]
-        S_end = S_beg + core.shape[-1]
+    for data, band, s_beg, s_end, S_beg, S_end in Summ_data:
         if band < 0:
+            # data is a full core
             if order == 'bck':
                 Phi[:, s_beg:s_end, :] += oe.contract('LSR,lML,sMNS,rNR->lsr', 
-                                                       Phi_now[:, S_beg:S_end, :], core_left, core, core_right)
+                                                       Phi_now[:, S_beg:S_end, :], core_left, data, core_right)
             elif order == 'fwd':
                 Phi[:, S_beg:S_end, :] += oe.contract('lsr,lML,sMNS,rNR->LSR', 
-                                                       Phi_now[:, s_beg:s_end, :], core_left, core, core_right)
+                                                       Phi_now[:, s_beg:s_end, :], core_left, data, core_right)
         else:
-            diagonals = tn.stack([tnf.pad(tn.diagonal(core, i, 1, 2), (0, -i))for i in range(-band, 0)] + 
-                                 [tnf.pad(tn.diagonal(core, i, 1, 2), (i, 0)) for i in range(0, band+1)])
+            # data is a core diagonals
             cores_left = tn.stack([tnf.pad(core_left[:, -i:, :], (0, 0, 0, -i)) for i in range(-band, 1)] + 
                                   [tnf.pad(core_left[:, :-i, :], (0, 0, i, 0)) for i in range(1, band+1)])
             if order == 'bck':
-                Phi[:, s_beg:s_end, :] += oe.contract('LSR,zlKL,zsSK,rKR->lsr', Phi_now[:, S_beg:S_end, :], cores_left, diagonals, core_right)
+                Phi[:, s_beg:s_end, :] += oe.contract('LSR,zlKL,zsSK,rKR->lsr', Phi_now[:, S_beg:S_end, :], cores_left, data, core_right)
             elif order == 'fwd':
-                Phi[:, S_beg:S_end, :] += oe.contract('lsr,zlKL,zsSK,rKR->LSR', Phi_now[:, s_beg:s_end, :], cores_left, diagonals, core_right)
-        s_beg = s_end if not first else 0
-        S_beg = S_end if not last else 0
+                Phi[:, S_beg:S_end, :] += oe.contract('lsr,zlKL,zsSK,rKR->LSR', Phi_now[:, s_beg:s_end, :], cores_left, data, core_right)
     return Phi
 
 
