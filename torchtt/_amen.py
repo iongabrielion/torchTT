@@ -227,17 +227,14 @@ def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, v
     #if A.N != b.N:
     #    raise ShapeMismatch('Dimension mismatch.')
 
-    use_cpp = False
-    if use_cpp and _flag_use_cpp:
-        if x0 == None:
-            x_cores = []
-            x_R = [1]*(1+len(A.N))
+    if use_cpp and _flag_use_cpp and isinstance(b, torchtt.TT):
+        if x0 is None:
+            x_cores = torchtt.randn(A.M, [1]+[2]*(len(A.M)-1)+[1], device=A.cores[0].device).cores
         else:
             x_cores = x0.cores
-            x_R = x0.R
 
-        # cores = torchttcpp.amen_solve(A_cores, B_cores, x_cores, b.N, A.R, b.R, x_R, nswp, eps, rmax, max_full, kickrank, kick2, local_iterations, resets, verbose, prec)
-        # return torchtt.TT(list(cores))
+        cores = torchttcpp.amen_mv(A.cores, b.cores, A.M, A.N, x_cores, eps, nswp, kickrank, kick2, 2 if verbose else 0, True, False)
+        return torchtt.TT(list(cores))
     else:
         if isinstance(b, list):
             op = mv_multiple_local_op(A, b, A.M, A.N, kickrank+kick2>0)

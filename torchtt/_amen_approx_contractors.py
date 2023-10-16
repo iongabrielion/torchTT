@@ -39,6 +39,12 @@ class mv_local_op():
                 phi = phi / norm
             self.phis_z[k] = phi.clone()
         else:
+            # print()
+            # print('Z', mode)
+            # path_info = oe.contract_path('zax,zmZ,amnA,xnX->ZAX',
+            #                   self.phis_z[k], z, self.A.cores[k], self.x.cores[k]); 
+            # print(path_info[1])
+            
             phi = oe.contract('zax,zmZ,amnA,xnX->ZAX',
                               self.phis_z[k], z, self.A.cores[k], self.x.cores[k])
             if return_norm:

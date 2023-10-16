@@ -203,9 +203,9 @@ def amen_approx(contractor, tol, shape_out_M, shape_out_N, y=None, z=None, nswp=
             ry[i + 1] = r
 
             nrms[i] = contractor.update_phi_y(cores_y[i], i, 'lr', 1, True)
-
+        
             if (kickrank + kickrank2 > 0):
-                crz, R = QR(crz)
+                crz, _ = QR(crz)
 
                 rz[i + 1] = crz.shape[1]
                 cores_z[i] = tn.reshape(crz, (rz[i], M[i], N[i], rz[i + 1]) if ttm else (rz[i], N[i], rz[i + 1]))
@@ -226,7 +226,6 @@ def amen_approx(contractor, tol, shape_out_M, shape_out_N, y=None, z=None, nswp=
             vt = vt[:r, :]
             v = tn.conj(vt.t())
             u = tn.einsum('ij,j->ij', u[:, :r], s[:r])
-
             # Prepare enrichment, if needed
             if (kickrank + kickrank2 > 0):
                 cry = u @ v.t()
@@ -256,7 +255,6 @@ def amen_approx(contractor, tol, shape_out_M, shape_out_N, y=None, z=None, nswp=
                 u = tn.hstack((u, tn.zeros((ry[i], rz[i]), device=device, dtype=dtype)))
                 u = tn.tensordot(u, R, ([1], [1]))
                 r = v.shape[1]
-
             
             cr2 = tn.tensordot(cores_y[i-1], u, ([3 if ttm else 2], [0]))
             cores_y[i - 1] = tn.reshape(cr2, (ry[i - 1], M[i-1],
@@ -269,7 +267,7 @@ def amen_approx(contractor, tol, shape_out_M, shape_out_N, y=None, z=None, nswp=
             nrms[i] = contractor.update_phi_y(cores_y[i], i, 'rl', 1, True)
 
             if (kickrank + kickrank2 > 0):
-
+                
                 crz, R = QR(crz.t())
 
                 rz[i] = crz.shape[1]
@@ -287,7 +285,7 @@ def amen_approx(contractor, tol, shape_out_M, shape_out_N, y=None, z=None, nswp=
         if ((direct > 0) and (i == d - 1)) or ((direct < 0) and (i == 0)):
             if (verb > 0):
                 tme_swp = datetime.datetime.now() - tme_swp
-                print('\tfinished after %s, max dx=%.3e, max rank=%d' %(str(tme_swp), max_dx, max(ry)))
+                print('\tfinished after %s, max dx %.3e, max rank %d' %(str(tme_swp), max_dx, max(ry)))
             if ((max_dx < tol) or (swp == nswp)) and (direct > 0):
                 break
             else:
