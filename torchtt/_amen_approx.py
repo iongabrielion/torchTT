@@ -8,7 +8,7 @@ import datetime
 from torchtt._decomposition import QR, SVD, lr_orthogonal, rl_orthogonal
 from torchtt._iterative_solvers import BiCGSTAB_reset, gmres_restart
 import opt_einsum as oe
-from ._amen_approx_contractors import mv_local_op, mv_multiple_local_op, mvm_multiple_local_op
+from ._amen_approx_contractors import mv_local_op, mv_multiple_local_op, mvm_multiple_local_op, mm_multiple_local_op
 
 def _reshape(a, shape):
     return _np.reshape(a, shape, order='F')

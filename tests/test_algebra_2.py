@@ -127,7 +127,8 @@ def test_amen_division_preconditioned(dtype):
     assert err_rel(a.full(), y.full()/x.full()) < 1e-11
 
 @pytest.mark.parametrize("dtype", [tn.float64])
-def test_amen_mv(dtype):
+@pytest.mark.parametrize("cpp", [False, True] if tntt.cpp_enabled() else [False])
+def test_amen_mv(dtype, cpp):
     """
     Test the AMEn matvec.
     """
@@ -140,7 +141,7 @@ def test_amen_mv(dtype):
     A = A + A + A + A + A
     x = x + x + x + x + x
 
-    C = tntt.amen_mv(A, x)
+    C = tntt.amen_mv(A, x, use_cpp=cpp)
 
     assert ((C-Cr).norm()/Cr.norm()) < 1e-11
 
@@ -162,21 +163,43 @@ def test_amen_mv(dtype):
     assert ((y-yr).norm()/yr.norm()) < 1e-11
     
 @pytest.mark.parametrize("dtype", [tn.float64])
-def test_amen_mv_multiple(dtype):
+@pytest.mark.parametrize("cpp", [False, True] if tntt.cpp_enabled() else [False])
+def test_amen_mv_multiple(dtype, cpp):
     """
-    Test the AMEn matvec.
+    Test the AMEn matvec with multiple vectors.
     """
 
     A = tntt.randn([(3, 4), (5, 6), (7, 8), (2, 3)], [1, 2, 2, 3, 1], dtype=dtype)
     xs = []
     Cr = 0
     for i in range(8):
-        xs.append(tntt.randn([4, 6, 8, 3], [1, 4, 3, 3, 1], dtype=dtype))
+        xs.append(tntt.randn([4, 6, 8, 3], [1, 3, 2, 2, 1], dtype=dtype))
+        xs[-1] = xs[-1] - xs[-1] + xs[-1]
         Cr = Cr + A@xs[-1]
-    C = tntt.amen_mv(A, xs)
+    C = tntt.amen_mv(A, xs, use_cpp=cpp)
 
     assert ((C-Cr).norm()/Cr.norm()) < 1e-11
 
+@pytest.mark.parametrize("dtype", [tn.float64])
+@pytest.mark.parametrize("cpp", [False, ] if tntt.cpp_enabled() else [False])
+def test_amen_mvm(dtype, cpp):
+    """
+    Test the AMEn matvec with multiple vectors.
+    """
+
+    n = 3
+    As = [tntt.randn([(3, 4), (5, 6), (7, 8), (2, 3)], [1, 2, 2, 3, 1], dtype=dtype) for i in range(n)]
+    xs = [tntt.randn([4,6,8,3], [1, 2, 2, 1, 1], dtype=dtype) for i in range(n)]
+    Bs = [tntt.randn([( 4,2), (6,3), (8,2), (3,1)], [1, 2, 2, 3, 1], dtype=dtype) for i in range(n)]
+
+    Cr = 0
+    for i in range(n):
+        Cr += As[i] @ tntt.diag(xs[i]) @ Bs[i]
+        Cr = Cr.round(1e-14)
+    C = tntt.amen_mvm(As, xs, Bs, use_cpp=cpp)
+
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+    
 @pytest.mark.parametrize("dtype", [tn.float64])
 def test_amen_mm(dtype):
     """

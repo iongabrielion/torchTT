@@ -404,8 +404,7 @@ namespace AMEn
 
         if (verb > 0)
         {
-
-            auto diff_time = std::chrono::high_resolution_clock::now() - tme_swp;
+            auto diff_time = std::chrono::high_resolution_clock::now() - tme_total;
             std::cout << "Finished in " << (double)(std::chrono::duration_cast<std::chrono::microseconds>(diff_time)).count() / 1000000.0 << " s" << std::endl;
         }
 
@@ -417,6 +416,15 @@ namespace AMEn
     {
         auto options = A_cores[0].options();
         ContractorMv contr(A_cores, x_cores, M, N, kickrank + kickrank2 > 0);
+        std::vector<at::Tensor> z;
+        std::vector<uint64_t> empty;
+        return AMEn::amen_approx(contr, eps, empty, M, y0, z, nswp, kickrank, kickrank2, verb, init_qr, fkick, options);
+    }
+
+    std::vector<at::Tensor> amen_mv_multiple(std::vector<at::Tensor> &A_cores, std::vector<std::vector<at::Tensor>> &x_cores, std::vector<uint64_t> M, std::vector<uint64_t> N, std::vector<at::Tensor> &y0, double eps, int32_t nswp, int32_t kickrank, int32_t kickrank2, int32_t verb, bool init_qr, bool fkick)
+    {
+        auto options = A_cores[0].options();
+        ContractorMvMultiple contr(A_cores, x_cores, M, N, kickrank + kickrank2 > 0);
         std::vector<at::Tensor> z;
         std::vector<uint64_t> empty;
         return AMEn::amen_approx(contr, eps, empty, M, y0, z, nswp, kickrank, kickrank2, verb, init_qr, fkick, options);
