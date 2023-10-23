@@ -744,7 +744,7 @@ namespace AMEn
                 core = torch::zeros({cores.sizes()[1], cores.sizes()[2], cores.sizes()[3], cores.sizes()[4]}, phi_left.options());
 
                 for (int i = -bandA; i < 0; ++i)
-                    core += torch::constant_pad_nd(cores.index({i + bandA, torch::indexing::Ellipsis, torch::indexing::Slice(torch::Indexing::None, i), torch::indexing::Ellipsis,torch::indexing::Ellipsis}), {0, 0, -i, 0});
+                    core += torch::constant_pad_nd(cores.index({i + bandA, torch::indexing::Ellipsis, torch::indexing::Slice(torch::indexing::None, i), torch::indexing::Ellipsis,torch::indexing::Ellipsis}), {0, 0, -i, 0});
                 for (int i = 0; i <= bandA; ++i)
                     core += torch::constant_pad_nd(cores.index({i + bandA, torch::indexing::Ellipsis, torch::indexing::Slice(i,torch::indexing::None), torch::indexing::Ellipsis,torch::indexing::Ellipsis}), {0, 0, 0, i});
             }
@@ -754,8 +754,8 @@ namespace AMEn
 
         static at::Tensor compute_phi_AB(char order, at::Tensor &phi_now, at::Tensor &coreA, at::Tensor &coreB, at::Tensor &core, int bandA, int bandB){
 
-            if(coreA.sisez()[1] != coreA.sizes()[2])
-                bandA = -1
+            if(coreA.sizes()[1] != coreA.sizes()[2])
+                bandA = -1;
             if(coreB.sizes()[1] != coreB.sizes()[2])
                 bandB = -1;
             if(bandA>=0 && bandB>=0)
@@ -788,7 +788,7 @@ namespace AMEn
                     this->B_cores[k] = std::vector<at::Tensor>(d);
                     for (int i = 0; i < d; ++i)
                     {
-                        if(A_cores[k][i].sisez()[1] != A_cores[k][i].sizes()[2])
+                        if(A_cores[k][i].sizes()[1] != A_cores[k][i].sizes()[2])
                             this->bands_A[k][i] = -1;
                         if(B_cores[k][i].sizes()[1] != B_cores[k][i].sizes()[2])
                             this->bands_B[k][i] = -1;
