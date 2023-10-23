@@ -61,16 +61,75 @@ print("Not Banded structure")
 time = datetime.datetime.now()
 x = tntt.solvers.amen_solve(L_tt, b_tt, x0=b_tt, nswp=20, eps=1e-8, verbose=False, preconditioner=None, use_cpp=True)
 time = datetime.datetime.now() - time
-print('Relative residual: ',(L_tt@x-b_tt).norm()/b_tt.norm())
-print('Solver time: ',time)
+print('Relative residual: ', (L_tt@x - b_tt).norm() / b_tt.norm())
+print('Solver time: ', time)
+
+print(" ")
 
 print("Banded structure")
 bands_A = [1] * len(L_tt.cores)
 time = datetime.datetime.now()
-x = tntt.solvers.amen_solve(L_tt, b_tt, x0=b_tt, nswp=20, eps=1e-8, verbose=False, bandsA=bands_A, preconditioner=None, use_cpp=True)
+x = tntt.solvers.amen_solve(L_tt, b_tt, x0=b_tt, nswp=20, eps=1e-8, verbose=False, bandsMatrices=bands_A, preconditioner=None, use_cpp=True)
 time = datetime.datetime.now() - time
-print('Relative residual: ',(L_tt@x-b_tt).norm()/b_tt.norm())
+print('Relative residual: ', (L_tt@x - b_tt).norm() / b_tt.norm())
+print('Solver time: ', time)
+
+print(" ")
+
+print("Not Banded structure for sum")
+time = datetime.datetime.now()
+x = tntt.solvers.amen_solve([L_tt, L_tt], b_tt, x0=b_tt, nswp=20, eps=1e-8, verbose=False, preconditioner=None, use_cpp=True)
+time = datetime.datetime.now() - time
+print('Relative residual: ', (2 * L_tt@x - b_tt).norm() / b_tt.norm())
+print('Solver time: ', time)
+
+
+print("Banded structure for sum")
+bands_A = [1] * len(L_tt.cores)
+time = datetime.datetime.now()
+x = tntt.solvers.amen_solve([L_tt, L_tt], b_tt, x0=b_tt, nswp=20, eps=1e-8, verbose=False, bandsMatrices=[bands_A, bands_A], preconditioner=None, use_cpp=True)
+time = datetime.datetime.now() - time
+print('Relative residual: ', (2 * L_tt@x-b_tt).norm()/b_tt.norm())
+print('Solver time: ', time)
+
+
+print("Preconditioner c")
+print("Not Banded structure")
+time = datetime.datetime.now()
+x = tntt.solvers.amen_solve(L_tt, b_tt, x0=b_tt, nswp=20, eps=1e-8, verbose=False, preconditioner='c', use_cpp=True)
+time = datetime.datetime.now() - time
+print('Relative residual: ', (L_tt@x - b_tt).norm()/b_tt.norm())
+print('Solver time: ', time)
+
+print(" ")
+
+print("Banded structure")
+bands_A = [1] * len(L_tt.cores)
+time = datetime.datetime.now()
+x = tntt.solvers.amen_solve(L_tt, b_tt, x0=b_tt, nswp=20, eps=1e-8, verbose=False, bandsMatrices=bands_A, preconditioner='c', use_cpp=True)
+time = datetime.datetime.now() - time
+print('Relative residual: ', (L_tt@x - b_tt).norm()/b_tt.norm())
+print('Solver time: ', time)
+
+print(" ")
+
+print("Not Banded structure for sum")
+time = datetime.datetime.now()
+x = tntt.solvers.amen_solve([L_tt, L_tt], b_tt, x0=b_tt, nswp=20, eps=1e-8, verbose=False, preconditioner='c', use_cpp=True)
+time = datetime.datetime.now() - time
+print('Relative residual: ', (2 * L_tt@x-b_tt).norm()/b_tt.norm())
+print('Solver time: ', time)
+
+
+print("Banded structure for sum")
+bands_A = [1] * len(L_tt.cores)
+time = datetime.datetime.now()
+x = tntt.solvers.amen_solve([L_tt, L_tt], b_tt, x0=b_tt, nswp=20, eps=1e-8, verbose=False, bandsMatrices=[bands_A, bands_A], preconditioner='c', use_cpp=True)
+time = datetime.datetime.now() - time
+print('Relative residual: ',(2 * L_tt@x - b_tt).norm()/b_tt.norm())
 print('Solver time: ',time)
+
+
 
 # Display the structure of the TT
 print(x)
@@ -79,7 +138,7 @@ print(x)
 #%% Try one more time on the GPU (if available).
 if tn.cuda.is_available():
     time = datetime.datetime.now()
-    x = tntt.solvers.amen_solve(L_tt.cuda(), b_tt.cuda() ,x0 = b_tt.cuda(), nswp = 20, eps = 1e-8, verbose = True, preconditioner='c')
+    x = tntt.solvers.amen_solve(L_tt.cuda(), b_tt.cuda() ,x0 = b_tt.cuda(), nswp=20, eps=1e-8, verbose=True, preconditioner='c')
     time = datetime.datetime.now() - time
     x = x.cpu()
     print('Relative residual: ',(L_tt@x-b_tt).norm()/b_tt.norm())
