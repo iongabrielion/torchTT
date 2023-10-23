@@ -159,6 +159,33 @@ def _local_AB(Phi_left, Phi_right, coreA, coreB, bandA=-1, bandB=-1):
                             [tnf.pad(tmp[i + bandA, :, :i, :, :], (0, 0, 0, 0, -i, 0)) for i in range(-bandA, 0)]), axis=0)
     return w
 
+def amen_hadamard(xs, eps = 1e-10, nswp=20, y0 = None, rmax=999999, kickrank=4, kick2=0, verbose=False, use_cpp=True):
+    
+    if not isinstance(xs, list) or len(xs) == 0 or not all([isinstance(xs[i], tn.Tensor) for i in range(len(xs))]): 
+        raise InvalidArguments("xs must be nonempty list of torch tensors.")
+    
+    if not (all([not xs[i].is_ttm for i in range(len(xs))]) or all([xs[i].is_ttm for i in range(len(xs))])):
+        raise InvalidArguments("The list either contains TTMs or TTs.")
+    
+    is_ttm = xs[0].is_ttm
+        
+    if use_cpp and _flag_use_cpp:
+        if y0 == None:
+            x_cores = []
+            x_R = [1]*(1+len(A.N))
+        else:
+            x_cores = y0.cores
+            x_R = y0.R
+
+        # cores = torchttcpp.amen_solve(A_cores, B_cores, x_cores, b.N, A.R, b.R, x_R, nswp, eps, rmax, max_full, kickrank, kick2, local_iterations, resets, verbose, prec)
+        # return torchtt.TT(list(cores))
+    else:
+        op = mvm_multiple_local_op(A, x, B, A[0].M, B[0].N, kickrank+kick2 > 0)
+        return amen_approx(op, eps, A[0].M, B[0].N, None, None, nswp, kickrank, kick2, 2 if verbose else 0, True, False, A[0].cores[0].device)
+
+    
+    
+        
 
 def amen_mvm(A, x, B, nswp=22, y0=None, eps=1e-10, rmax=999999, kickrank=4, kick2=0, verbose=False, use_cpp=True):
     """

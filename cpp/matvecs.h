@@ -134,7 +134,10 @@ private:
     at::Tensor Phi_right;
     at::Tensor coreA;
     at::Tensor J;
+    at::Tensor bands;
+
     int prec;
+    int band_diagonals;
     at::IntArrayRef shape;
     at::TensorOptions options;
 
@@ -150,18 +153,45 @@ public:
        ;
     }
     
-    void setter(at::Tensor &Phi_left, at::Tensor &Phi_right, at::Tensor & coreA, at::IntArrayRef shape, int prec, at::TensorOptions options){
+    void setter(at::Tensor &Phi_left, at::Tensor &Phi_right, at::Tensor & coreA, at::IntArrayRef shape, int prec, at::TensorOptions options, int band_diagonals=-1){
         this->prec = prec;
         this->options = options;
         this->shape = shape;
+        this->band_diagonals = band_diagonals;
 
         this->Phi_left = Phi_left; //torch::from_blob(Phi_left.contiguous().data_ptr<T>(), Phi_left.sizes(), options);
         this->Phi_right = Phi_right; //torch::from_blob(Phi_right.contiguous().data_ptr<T>(), Phi_right.sizes(), options);
-        this->coreA = coreA; // torch::from_blob(coreA.contiguous().data_ptr<T>(), coreA.sizes(), options);
+        if(band_diagonals<0)
+            this->coreA = coreA; // torch::from_blob(coreA.contiguous().data_ptr<T>(), coreA.sizes(), options);
+        else 
+        {
+            std::vector<at::Tensor> tmp;
+            for(int i=-band_diagonals; i<0;++i)
+                tmp.push_back(torch::constant_pad_nd(at::diagonal(coreA, i, 1, 2),{0,-i}));
+            for(int i=1; i<=band_diagonals;++i)
+                tmp.push_back(torch::constant_pad_nd(at::diagonal(coreA, i, 1, 2),{i,0}));
+
+            this->bands = at::stack(tmp);
+        }
+
         if(this->prec == C_PREC){
-            auto Jl = at::tensordot(at::diagonal(Phi_left,0,0,2), coreA, {0}, {0});
-            auto Jr = at::diagonal(Phi_right, 0, 0, 2);
-            this->J = at::linalg_inv(at::tensordot(Jl,Jr,{3},{0}).permute({0,3,1,2}));
+            if(band_diagonals < 0)
+            {
+                auto Jl = at::tensordot(at::diagonal(Phi_left,0,0,2), coreA, {0}, {0});
+                auto Jr = at::diagonal(Phi_right, 0, 0, 2);
+                this->J = at::linalg_inv(at::tensordot(Jl,Jr,{3},{0}).permute({0,3,1,2}));
+            }
+            else
+            {
+                auto diags_Jl = at::einsum("sd,ksSn->kdSn", {at::diagonal(Phi_left,0,0,2), this->bands});
+                auto diags_Jr = at::diagonal(Phi_right, 0, 0, 2);
+                auto diags_J = at::einsum("kdSn,SD->kdDn", {diags_Jl, diags_Jr});
+                this->J = torch::zeros({Phi_left.sizes()[2], Phi_right.sizes()[2], this->bands.sizes()[3], this->bands.sizes()[3]}, options);
+                for(int i=-band_diagonals; i<=band_diagonals;++i)
+                {
+
+                }
+            }
         }
         else if(this->prec == R_PREC){
             auto Jl = at::tensordot(at::diagonal(Phi_left,0,0,2), coreA, {0},{0}); // sd,smnS->dmnS
