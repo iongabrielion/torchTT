@@ -12,7 +12,7 @@ from torchtt._iterative_solvers import BiCGSTAB_reset, gmres_restart
 import opt_einsum as oe
 import torch.nn.functional as tnf
 from .errors import *
-
+from ._amen_approx import amen_approx, mv_local_op, mv_multiple_local_op, mvm_multiple_local_op, mm_multiple_local_op
 
 try:
     import torchttcpp
@@ -66,7 +66,7 @@ def cpp_enabled():
 #                 else:
 #                     w += oe.contract('rab,amnA,bBn,RAB->rmnR', Phi_left, coreA, diag_B, Phi_right)
 #     else:
-#         if bandB < 0: 
+#         if bandB < 0:
 #             for i in range(-bandA, bandA+1):
 #                 diag_A = tn.diagonal(coreA, i, 1, 2)
 #                 if i < 0:
@@ -75,7 +75,7 @@ def cpp_enabled():
 #                     w[:, :-i, :, :] += oe.contract('rab,aAm,bmnB,RAB->rmnR', Phi_left, diag_A, coreB[:, i:, :, :], Phi_right)
 #                 else:
 #                     w += oe.contract('rab,aAm,bmnB,RAB->rmnR', Phi_left, diag_A, coreB, Phi_right)
-#         else:  
+#         else:
 #             band = min(bandA + bandB, coreA.shape[1] - 1)
 #             band_min = min(bandA, bandB)
 #             for k in range(-band, band+1):
@@ -114,8 +114,9 @@ def cpp_enabled():
 #                             diag_w[:, :, :-l] += oe.contract('rab,aAm,bBm,RAB->rRm', Phi_left, diag_A, diag_B, Phi_right)
 #                         else:
 #                             diag_w[:, :, -l:] += oe.contract('rab,aAm,bBm,RAB->rRm', Phi_left, diag_A, diag_B, Phi_right)
-            
+
 #     return w
+
 
 def _local_AB(Phi_left, Phi_right, coreA, coreB, bandA=-1, bandB=-1):
     """
@@ -130,30 +131,70 @@ def _local_AB(Phi_left, Phi_right, coreA, coreB, bandA=-1, bandB=-1):
     Returns:
         torch.tensor: _description_
     """
-    w = tn.zeros(Phi_left.shape[0], coreA.shape[1], coreB.shape[2], Phi_right.shape[0], dtype=coreA.dtype, device=coreA.device)
+    w = tn.zeros(Phi_left.shape[0], coreA.shape[1], coreB.shape[2],
+                 Phi_right.shape[0], dtype=coreA.dtype, device=coreA.device)
     if (bandA >= 0) and (bandB >= 0):
         if (bandA >= bandB):
             bandA = -1
         else:
             bandB = -1
-        
+
     if bandA < 0:
         if bandB < 0:
             w = oe.contract('rab,amkA,bknB,RAB->rmnR',
-                            Phi_left, coreA, coreB, Phi_right)        
+                            Phi_left, coreA, coreB, Phi_right)
         else:
-            diagonals = tn.stack([tnf.pad(tn.diagonal(coreB, i, 1, 2), (-i, 0)) for i in range(-bandB, 0)] + 
+            diagonals = tn.stack([tnf.pad(tn.diagonal(coreB, i, 1, 2), (-i, 0)) for i in range(-bandB, 0)] +
                                  [tnf.pad(tn.diagonal(coreB, i, 1, 2), (0, i)) for i in range(0, bandB+1)])
-            tmp = oe.contract('rab,amnA,lbBn,RAB->lrmnR', Phi_left, coreA, diagonals, Phi_right)
-            w = tn.sum(tn.stack([tnf.pad(tmp[i + bandB, :, :, -i:, :], (0, 0, 0, -i)) for i in range(-bandB, 1)] + 
+            tmp = oe.contract('rab,amnA,lbBn,RAB->lrmnR',
+                              Phi_left, coreA, diagonals, Phi_right)
+            w = tn.sum(tn.stack([tnf.pad(tmp[i + bandB, :, :, -i:, :], (0, 0, 0, -i)) for i in range(-bandB, 1)] +
                                 [tnf.pad(tmp[i + bandB, :, :, :-i, :], (0, 0, i, 0)) for i in range(1, bandB+1)]), axis=0)
     else:
-        diagonals = tn.stack([tnf.pad(tn.diagonal(coreA, i, 1, 2), (0, -i)) for i in range(-bandA, 0)] + 
+        diagonals = tn.stack([tnf.pad(tn.diagonal(coreA, i, 1, 2), (0, -i)) for i in range(-bandA, 0)] +
                              [tnf.pad(tn.diagonal(coreA, i, 1, 2), (i, 0)) for i in range(0, bandA+1)])
-        tmp = oe.contract('rab,laAm,bmnB,RAB->lrmnR', Phi_left, diagonals, coreB, Phi_right)
-        w = tn.sum(tn.stack([tnf.pad(tmp[i + bandA, :, i:, :, :], (0, 0, 0, 0, 0, i)) for i in range(0, bandA+1)] + 
+        tmp = oe.contract('rab,laAm,bmnB,RAB->lrmnR',
+                          Phi_left, diagonals, coreB, Phi_right)
+        w = tn.sum(tn.stack([tnf.pad(tmp[i + bandA, :, i:, :, :], (0, 0, 0, 0, 0, i)) for i in range(0, bandA+1)] +
                             [tnf.pad(tmp[i + bandA, :, :i, :, :], (0, 0, 0, 0, -i, 0)) for i in range(-bandA, 0)]), axis=0)
     return w
+
+
+def amen_mvm(A, x, B, nswp=22, y0=None, eps=1e-10, rmax=999999, kickrank=4, kick2=0, verbose=False, use_cpp=True):
+    """
+    Approxmate `y = A[0] @ totchtt.diag(x[0]) @ B[0] + A[1] @ totchtt.diag(x[1]) @ B[1] + ... `
+
+    Args:
+        A (list[torchtt.TT]): the TT matrices.
+        x (list[torchtt.TT]): the TT tensors.
+        B (list[torchtt.TT]): the TT matrices.
+        nswp (int, optional): number of sweeps. Defaults to 22.
+        y0 (torchtt.TT, optional): initial guess. Defaults to None.
+        eps (float, optional): relative tolerance. Defaults to 1e-10.
+        rmax (int, optional): maximum rank. Defaults to 1024.
+        kickrank (int, optional): rank enrichment. Defaults to 4.
+        kick2 (int, optional): rank of random component. Defaults to 0.
+        verbose (bool, optional): discplay extra info to console. Defaults to False.
+        use_cpp (bool, optional): use the C++ version (not implemented yet). Defaults to True.
+
+    Returns:
+        torchtt.TT: the result.
+    """
+
+    if use_cpp and _flag_use_cpp:
+        if y0 == None:
+            x_cores = []
+            x_R = [1]*(1+len(A.N))
+        else:
+            x_cores = y0.cores
+            x_R = y0.R
+
+        # cores = torchttcpp.amen_solve(A_cores, B_cores, x_cores, b.N, A.R, b.R, x_R, nswp, eps, rmax, max_full, kickrank, kick2, local_iterations, resets, verbose, prec)
+        # return torchtt.TT(list(cores))
+    else:
+        op = mvm_multiple_local_op(A, x, B, A[0].M, B[0].N, kickrank+kick2 > 0)
+        return amen_approx(op, eps, A[0].M, B[0].N, None, None, nswp, kickrank, kick2, 2 if verbose else 0, True, False, A[0].cores[0].device)
+
 
 def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False, use_cpp=True, bandsA=None):
     """
@@ -162,7 +203,7 @@ def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, v
 
     Args:
         A (torchtt.TT): the matrix in TT.
-        b (torchtt.TT): the tensor TT.
+        b (torchtt.TT | list[torchtt.TT]): the tensor TT or a list of tensors.
         nswp (int, optional): number of sweeps. Defaults to 22.
         x0 (torchtt.TT, optional): initial guess. In None is provided the initial guess is a ones tensor. Defaults to None.
         eps (float, optional): relative residual. Defaults to 1e-10.
@@ -183,29 +224,38 @@ def amen_mv(A, b, nswp=22, x0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, v
         torchtt.TT: the approximation of the solution in TT format.
     """
     # perform checks of the input data
-    if not (isinstance(A, torchtt.TT) and isinstance(b, torchtt.TT)):
+    if not (isinstance(A, torchtt.TT) and (isinstance(b, torchtt.TT) or isinstance(b, list))):
         raise InvalidArguments('A and b must be TT instances.')
-    if not (A.is_ttm and not b.is_ttm):
+    if not A.is_ttm:
         raise IncompatibleTypes('A must be TT-matrix and b must be vector.')
-    if A.N != b.N:
-        raise ShapeMismatch('Dimension mismatch.')
+    # if A.N != b.N:
+    #    raise ShapeMismatch('Dimension mismatch.')
 
-    use_cpp = False
     if use_cpp and _flag_use_cpp:
-        if x0 == None:
-            x_cores = []
-            x_R = [1]*(1+len(A.N))
+        if x0 is None:
+            x_cores = torchtt.randn(
+                A.M, [1]+[2]*(len(A.M)-1)+[1], device=A.cores[0].device).cores
         else:
             x_cores = x0.cores
-            x_R = x0.R
 
-        # cores = torchttcpp.amen_solve(A_cores, B_cores, x_cores, b.N, A.R, b.R, x_R, nswp, eps, rmax, max_full, kickrank, kick2, local_iterations, resets, verbose, prec)
-        # return torchtt.TT(list(cores))
+        if isinstance(b, torchtt.TT):
+            cores = torchttcpp.amen_mv(A.cores, b.cores, A.M, A.N, x_cores,
+                                       eps, nswp, kickrank, kick2, 2 if verbose else 0, True, False)
+            return torchtt.TT(list(cores))
+        else:
+            cores = torchttcpp.amen_mv_multiple(A.cores, [
+                                                tmp.cores for tmp in b], A.M, A.N, x_cores, eps, nswp, kickrank, kick2, 2 if verbose else 0, True, False)
+            return torchtt.TT(list(cores))
     else:
-        return _amen_mm_python(A.cores, [c[:, :, None, :] for c in b.cores], A.M, [1]*len(A.M), A.N, False, nswp, x0.cores if x0 is not None else None, x0.R if x0 is not None else None, eps, rmax, kickrank, kick2, verbose, bandsA)
+        if isinstance(b, list):
+            op = mv_multiple_local_op(A, b, A.M, A.N, kickrank+kick2 > 0)
+        else:
+            op = mv_local_op(A, b, A.M, A.N, kickrank+kick2 > 0)
+        return amen_approx(op, eps, None, A.M, x0, None, nswp, kickrank, kick2, 2 if verbose else 0, True, False, A.cores[0].device)
+        # return _amen_mm_python(A.cores, [c[:, :, None, :] for c in b.cores], A.M, [1]*len(A.M), A.N, False, nswp, x0.cores if x0 is not None else None, x0.R if x0 is not None else None, eps, rmax, kickrank, kick2, verbose, bandsA)
 
 
-def amen_mm(A, B, nswp=22, X0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False, bandsA=None, bandsB=None):
+def amen_mm(A, B, nswp=22, X0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False, use_cpp=True, bandsA=None, bandsB=None):
     """
     Perform the TTM-TTM product using AMEn optimization.
     Suited when the operators have high ranks, but the result is expected to be low rank.
@@ -226,7 +276,30 @@ def amen_mm(A, B, nswp=22, X0=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, v
     Returns:
         torchtt.TT: the result.
     """
-    return _amen_mm_python(A.cores, B.cores, A.M, B.N, A.N, True, nswp, X0.cores if X0 is not None else None, X0.R if X0 is not None else None,   eps, rmax, kickrank, kick2, verbose, bandsA, bandsB)
+    use_cpp = False
+    
+    if bandsA is None:
+        bandsA = [[-1]*len(A.M)] if isinstance(A, torchtt.TT) else [[-1]*len(a.M) for a in A]
+    elif isinstance(A, torchtt.TT):
+        bandsA = [bandsA]
+    if bandsB is None:
+        bandsB = [[-1]*len(B.M)] if isinstance(B, torchtt.TT) else [[-1]*len(b.M) for b in B]
+    elif isinstance(B, torchtt.TT):
+        bandsB = [bandsB]
+
+    if use_cpp and _flag_use_cpp:
+        if X0 is None:
+            x_cores = []
+        else:
+            x_cores = X0.cores
+
+        # cores = torchttcpp.amen_solve(A_cores, B_cores, x_cores, b.N, A.R, b.R, x_R, nswp, eps, rmax, max_full, kickrank, kick2, local_iterations, resets, verbose, prec)
+        # return torchtt.TT(list(cores))
+    else:
+        op = mm_multiple_local_op([A] if isinstance(A, torchtt.TT) else A, [B] if isinstance(B, torchtt.TT) else B, A.M if isinstance(A, torchtt.TT) else A[0].M, B.N if isinstance(B, torchtt.TT) else B[0].N, kickrank+kick2 > 0, bandsA, bandsB)
+        return amen_approx(op, eps, A.M if isinstance(A, torchtt.TT) else A[0].M, B.N if isinstance(B, torchtt.TT) else B[0].N, X0, None, nswp, kickrank, kick2, 2 if verbose else 0, True, False, A.cores[0].device if isinstance(A, torchtt.TT) else A[0].cores[0].device)
+
+    # return _amen_mm_python(A.cores, B.cores, A.M, B.N, A.N, True, nswp, X0.cores if X0 is not None else None, X0.R if X0 is not None else None,   eps, rmax, kickrank, kick2, verbose, bandsA, bandsB)
 
 
 def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, rx=None, eps=1e-10, rmax=1024, kickrank=4, kick2=0, verbose=False, bandsA=None, bandsB=None):
@@ -347,7 +420,7 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
             # update phis (einsum)
             Phis[k] = _compute_phi_bck_x(Phis[k+1], x_cores[k], x_cores[k])
             Phis_rhs[k] = _compute_phi_AB('bck',
-                Phis_rhs[k+1], A_cores[k], B_cores[k], x_cores[k], bandsA[k], bandsB[k])
+                                          Phis_rhs[k+1], A_cores[k], B_cores[k], x_cores[k], bandsA[k], bandsB[k])
 
             # ... and norms
             # norm = tn.linalg.norm(Phis[k])
@@ -367,7 +440,7 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
                 Phiz[k] = _compute_phi_bck_x(
                     Phiz[k+1], z_cores[k], x_cores[k]) / normA[k-1]
                 Phiz_rhs[k] = _compute_phi_AB('bck',
-                    Phiz_rhs[k+1], A_cores[k], B_cores[k], z_cores[k], bandsA[k], bandsB[k]) / normb[k-1]
+                                              Phiz_rhs[k+1], A_cores[k], B_cores[k], z_cores[k], bandsA[k], bandsB[k]) / normb[k-1]
 
         # start loop
         max_dx = 0
@@ -469,8 +542,8 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
                 # next phis with norm correction
                 Phis[k+1] = _compute_phi_fwd_x(Phis[k], x_cores[k], x_cores[k])
                 Phis_rhs[k+1] = _compute_phi_AB('fwd',
-                    Phis_rhs[k], A_cores[k], B_cores[k], x_cores[k], bandsA[k], bandsB[k])
-                
+                                                Phis_rhs[k], A_cores[k], B_cores[k], x_cores[k], bandsA[k], bandsB[k])
+
                 # ... and norms
                 # norm = tn.linalg.norm(Phis[k+1])
                 # norm = norm if norm > 0 else 1.0
@@ -489,7 +562,7 @@ def _amen_mm_python(A_cores, B_cores, M, N, K, to_ttm, nswp=22, X0_cores=None, r
                     Phiz[k+1] = _compute_phi_fwd_x(Phiz[k],
                                                    z_cores[k], x_cores[k]) / normA[k]
                     Phiz_rhs[k+1] = _compute_phi_AB('fwd',
-                        Phiz_rhs[k], A_cores[k], B_cores[k], z_cores[k], bandsA[k], bandsB[k]) / normb[k]
+                                                    Phiz_rhs[k], A_cores[k], B_cores[k], z_cores[k], bandsA[k], bandsB[k]) / normb[k]
             else:
                 x_cores[k] = tn.reshape(
                     u@tn.diag(s[:r]) @ v[:r, :].t(), [rx[k], M[k], N[k], rx[k+1]])
@@ -559,7 +632,8 @@ def _compute_phi_fwd_x(Phi_now, core_left, core_right):
     Phi_next = oe.contract('lr,lMNL,rMNR->LR', Phi_now, core_left, core_right)
 
     return Phi_next
-    
+
+
 def _compute_phi_AB(order, Phi_now, coreA, coreB, core, bandA=-1, bandB=-1):
     """
 
@@ -576,7 +650,7 @@ def _compute_phi_AB(order, Phi_now, coreA, coreB, core, bandA=-1, bandB=-1):
     Returns:
         torch.tensor: If order is fwd: the forward phi corresponding to the rhs. Has shape r_k+1 x rA_k+1 x rB_k+1
                       If order is bck: the backward phi corresponding to the rhs. Has shape r_k x rA_k+1 x rB_k+1
-    """ 
+    """
     if coreA.shape[1] != coreA.shape[2]:
         bandA = -1
     if coreB.shape[1] != coreB.shape[2]:
@@ -586,33 +660,35 @@ def _compute_phi_AB(order, Phi_now, coreA, coreB, core, bandA=-1, bandB=-1):
             bandA = -1
         else:
             bandB = -1
-    
+
     if bandA < 0:
         if bandB < 0:
             if order == 'bck':
-                Phi = oe.contract('RAB,amkA,bknB,rmnR->rab', Phi_now, coreA, coreB, core)
+                Phi = oe.contract('RAB,amkA,bknB,rmnR->rab',
+                                  Phi_now, coreA, coreB, core)
             else:
-                Phi = oe.contract('rab,amkA,bknB,rmnR->RAB', Phi_now, coreA, coreB, core)
+                Phi = oe.contract('rab,amkA,bknB,rmnR->RAB',
+                                  Phi_now, coreA, coreB, core)
         else:
             if order == 'bck':
                 sizes = 'RAB,amkA,lbBk,lrmkR->rab'
             else:
                 sizes = 'rab,amkA,lbBk,lrmkR->RAB'
-            diagonals_B = tn.stack([tnf.pad(tn.diagonal(coreB, i, 1, 2), (-i, 0))for i in range(-bandB, 0)] + 
+            diagonals_B = tn.stack([tnf.pad(tn.diagonal(coreB, i, 1, 2), (-i, 0))for i in range(-bandB, 0)] +
                                    [tnf.pad(tn.diagonal(coreB, i, 1, 2), (0, i)) for i in range(0, bandB+1)])
-            cores = tn.stack([tnf.pad(core[:, :, :i, :], (0, 0, -i, 0)) for i in range(-bandB, 0)] + 
+            cores = tn.stack([tnf.pad(core[:, :, :i, :], (0, 0, -i, 0)) for i in range(-bandB, 0)] +
                              [tnf.pad(core[:, :, i:, :], (0, 0, 0, i)) for i in range(0, bandB+1)])
             Phi = oe.contract(sizes, Phi_now, coreA, diagonals_B, cores)
-    else: 
-            if order == 'bck':
-                sizes = 'RAB,laAk,bknB,lrknR->rab'
-            else:
-                sizes = 'rab,laAk,bknB,lrknR->RAB'
-            diagonals_A = tn.stack([tnf.pad(tn.diagonal(coreA, i, 1, 2), (0, -i))for i in range(-bandA, 0)] + 
-                                    [tnf.pad(tn.diagonal(coreA, i, 1, 2), (i, 0)) for i in range(0, bandA+1)])
-            cores = tn.stack([tnf.pad(core[:, -i:, :, :], (0, 0, 0, 0, 0, -i)) for i in range(-bandA, 1)] + 
-                             [tnf.pad(core[:, :-i, :, :], (0, 0, 0, 0, i, 0)) for i in range(1, bandA+1)])
-            Phi = oe.contract(sizes, Phi_now, diagonals_A, coreB, cores)
+    else:
+        if order == 'bck':
+            sizes = 'RAB,laAk,bknB,lrknR->rab'
+        else:
+            sizes = 'rab,laAk,bknB,lrknR->RAB'
+        diagonals_A = tn.stack([tnf.pad(tn.diagonal(coreA, i, 1, 2), (0, -i))for i in range(-bandA, 0)] +
+                               [tnf.pad(tn.diagonal(coreA, i, 1, 2), (i, 0)) for i in range(0, bandA+1)])
+        cores = tn.stack([tnf.pad(core[:, -i:, :, :], (0, 0, 0, 0, 0, -i)) for i in range(-bandA, 1)] +
+                         [tnf.pad(core[:, :-i, :, :], (0, 0, 0, 0, i, 0)) for i in range(1, bandA+1)])
+        Phi = oe.contract(sizes, Phi_now, diagonals_A, coreB, cores)
     return Phi
 
 
@@ -622,7 +698,7 @@ def _compute_phi_AB(order, Phi_now, coreA, coreB, core, bandA=-1, bandB=-1):
 
 #     Args:
 #         order(str): fwd - for forward phi or bck - for backward phi
-#         Phi_now (torch.tensor): The current phi. 
+#         Phi_now (torch.tensor): The current phi.
 #                                 If order is fwd has shape r_k x rA_k x rB_k.
 #                                 If order is bck has shape  r_k+1 x rA_k+1 x rB_k+1
 #         coreA (torch.tensor): The current core of the rhs. Has shape rA_k x M_k x K_k x rA_k+1
@@ -640,12 +716,12 @@ def _compute_phi_AB(order, Phi_now, coreA, coreB, core, bandA=-1, bandB=-1):
 #         Phi = tn.zeros(core.shape[-1], coreA.shape[-1], coreB.shape[-1], dtype=coreA.dtype, device=coreA.device)
 #     else:
 #         assert(0)
-    
+
 #     if coreA.shape[1] != coreA.shape[2]:
 #         bandA = -1
 #     if coreB.shape[1] != coreB.shape[2]:
 #         bandB = -1
-    
+
 #     if bandA < 0:
 #         if bandB < 0:
 #             if order == 'bck':
@@ -666,7 +742,7 @@ def _compute_phi_AB(order, Phi_now, coreA, coreB, core, bandA=-1, bandB=-1):
 #                 else:
 #                     Phi += oe.contract(sizes, Phi_now, coreA, diag_B, core)
 #     else:
-#         if bandB < 0: 
+#         if bandB < 0:
 #             if order == 'bck':
 #                 sizes = 'RAB,aAk,bknB,rknR->rab'
 #             else:
