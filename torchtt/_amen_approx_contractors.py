@@ -27,6 +27,8 @@ def _local_AB(Phi_left, Phi_right, coreA, coreB, bandA=-1, bandB=-1):
         if bandB < 0:
             w = oe.contract('rab,amkA,bknB,RAB->rmnR',
                             Phi_left, coreA, coreB, Phi_right)
+            #path = oe.contract_path('rab,amkA,bknB,RAB->rmnR', Phi_left, coreA, coreB, Phi_right)
+            #print(path[1])
         else:
             diagonals = tn.stack([tnf.pad(tn.diagonal(coreB, i, 1, 2), (-i, 0)) for i in range(-bandB, 0)] +
                                  [tnf.pad(tn.diagonal(coreB, i, 1, 2), (0, i)) for i in range(0, bandB+1)])
