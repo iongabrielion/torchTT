@@ -201,6 +201,27 @@ def test_amen_mvm(dtype, cpp):
     assert ((C-Cr).norm()/Cr.norm()) < 1e-11
     
 @pytest.mark.parametrize("dtype", [tn.float64])
+def test_amen_hadamard(dtype):
+    
+    xs = [tntt.randn([4,6,8,3], [1, 2, 2, 1, 1], dtype=dtype) for i in range(8)]
+
+    y_ref = xs[0]*xs[1] + xs[2]*xs[3]*xs[4] + xs[5]*xs[6] + xs[7]
+    y_ref = y_ref.round(1e-14)
+
+    y = tntt.amen_hadamard([(xs[0], xs[1]), (xs[2],xs[3],xs[4]), (xs[5], xs[6]), (xs[7], )])
+
+    assert (y-y_ref).norm()/y_ref.norm() < 1e-11
+    
+    As = [tntt.randn([(4,2),(3,4),(5,2),(3,3)], [1, 2, 2, 1, 1], dtype=dtype) for i in range(8)]
+
+    y_ref = As[0]*As[1] + As[2]*As[3]*As[4] + As[5]*As[6] + As[7]
+    y_ref = y_ref.round(1e-14)
+
+    y = tntt.amen_hadamard([(As[0], As[1]), (As[2],As[3],As[4]), (As[5], As[6]), (As[7], )])
+
+    assert (y-y_ref).norm()/y_ref.norm() < 1e-11
+
+@pytest.mark.parametrize("dtype", [tn.float64])
 def test_amen_mm(dtype):
     """
     Test the AMEn matmat.

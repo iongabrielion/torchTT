@@ -763,6 +763,76 @@ namespace AMEn
                     bandA = -1;
                 else
                     bandB = -1;
+            
+            at::Tensor phi;
+
+            if(bandA < 0)
+            {
+                if(bandB<0)
+                {
+                    if(order=='B')
+                    {
+                        //    Complete contraction:  RAB,amkA,bknB,rmnR->rab
+                        //    --------------------------------------------------------------------------------
+                        //    scaling        BLAS                current                             remaining
+                        //    --------------------------------------------------------------------------------
+                        //    6           TDOT        amkA,RAB->amkRB                  bknB,rmnR,amkRB->rab
+                        //    7           TDOT      amkRB,rmnR->akBrn                       bknB,akBrn->rab
+                        //    6           TDOT        akBrn,bknB->rab                              rab->rab
+                        auto tmp1 = at::tensordot(coreA, phi_now, {3}, {1});   // amkA,RAB->amkRB 
+                        auto tmp2 = at::tensordot(tmp2, core, {1, 4}, {1, 3}); // amkRB,rmnR->akBrn
+                        phi = at::tensordot(tmp2, coreB, {1,2,4}, {1,3,2}).permute({1,0,2}); // akBrn,bknB->arb and permute
+                    }
+                    else
+                    {
+                        //  Complete contraction:  rab,amkA,bknB,rmnR->RAB
+                        //    --------------------------------------------------------------------------------
+                        //    scaling        BLAS                current                             remaining
+                        //    --------------------------------------------------------------------------------
+                        //    6           GEMM        bknB,rab->knBra                  amkA,rmnR,knBra->RAB
+                        //    7           TDOT      knBra,rmnR->kBamR                       amkA,kBamR->RAB
+                        //    6           TDOT        kBamR,amkA->RAB                              RAB->RAB
+                        auto tmp1 = at::tensordot(coreB, phi, {0}, {2}); // bknB,rab->knBra
+                        auto tmp2 = at::tensordot(tmp1, core, {1,3}, {2,0}); // knBra,rmnR->kBamR
+                        phi = at::tensordot(coreA, tmp2, {0,1,2}, {2,3,0}); // amkA,kBamR->RAB
+                    }
+                }
+                else
+                {
+
+                    if(order=='B')
+                    {
+                        //  Complete contraction:  RAB,amkA,lbBk,lrmkR->rab
+                        //--------------------------------------------------------------------------------
+                        //scaling        BLAS                current                             remaining
+                        //--------------------------------------------------------------------------------
+                        //   6           TDOT        amkA,RAB->amkRB                 lbBk,lrmkR,amkRB->rab
+                        //   7              0     amkRB,lrmkR->akBlr                       lbBk,akBlr->rab
+                        //   6           TDOT        akBlr,lbBk->rab                              rab->rab
+
+                    }
+                    else
+                    {
+                        //Complete contraction:  rab,amkA,lbBk,lrmkR->RAB
+                        //--------------------------------------------------------------------------------
+                        //scaling        BLAS                current                             remaining
+                        //--------------------------------------------------------------------------------
+                        //   6           TDOT        lbBk,rab->lBkra                 amkA,lrmkR,lBkra->RAB
+                        //   7              0     lBkra,lrmkR->BkamR                       amkA,BkamR->RAB
+                        //   6           TDOT        BkamR,amkA->RAB                              RAB->RAB
+                        phi = torch::zeros({core.sizes()[3], coreA.sizes()[3], coreB.sizes()[3]}, coreA.options());
+                        for(int i=-bandB;i<0;++i)
+                        {
+                            auto core_tmp = at::constant_pad_nd(core.index({torch::indexing::Ellipsis, torch::indexing::Ellipsis, torch::indexing::Slice(torch::indexing::None, i), torch::indexing::Ellipsis}, {0,0,-i,0})); 
+                            
+                        }
+                    }
+                }
+            }
+            else
+            {
+
+            }
         }
 
         ContractorMMMultiple(std::vector<std::vector<at::Tensor>> &A_cores, std::vector<std::vector<at::Tensor>> &B_cores, std::vector<uint64_t> &M, std::vector<uint64_t> &N, bool has_z, std::vector<std::vector<int>> bands_A, std::vector<std::vector<int>> bands_B)
