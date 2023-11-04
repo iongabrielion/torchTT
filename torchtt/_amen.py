@@ -160,7 +160,45 @@ def _local_AB(Phi_left, Phi_right, coreA, coreB, bandA=-1, bandB=-1):
     return w
 
 def amen_hadamard(xs, eps = 1e-10, nswp=20, y0 = None, rmax=999999, kickrank=4, kick2=0, verbose=False, use_cpp=True):
+    """
+    Perform elementwise multiplication between TT tensors.
+    input `xs` has to be a list of tuple of tensors. The tensors in the tuple are elementwise multiplied and the results of the tuples arre added.
     
+    Examples:
+    
+    ```
+    import torchtt as tntt
+    import torch as tn
+
+    xs = [tntt.randn([4, 6, 8, 3], [1, 2, 2, 1, 1]) for i in range(8)]
+
+    y_ref = xs[0]*xs[1] + 1e-6*xs[2]*xs[3]*xs[4] + xs[5]*xs[6] + xs[7]
+    y_ref = y_ref.round(1e-18)
+
+    y = tntt.amen_hadamard([(xs[0], xs[1]), (1e-2*xs[2], 1e-2*xs[3], 1e-2*xs[4]), (xs[5], xs[6]), (xs[7],
+                                                                                                )], eps=1e-8)
+
+    print((y-y_ref).norm()/y_ref.norm())
+    ```
+
+    Args:
+        xs (list[tuple[torchtt.TT]]): _description_
+        eps (float, optional): relative tolerance. Defaults to 1e-10.
+        nswp (int, optional): number of sweeps. Defaults to 20.
+        y0 (torchtt.TT, optional): initial guess. Defaults to None.
+        rmax (int, optional): mqaximum rank. Defaults to 999999.
+        kickrank (int, optional): kickrank. Defaults to 4.
+        kick2 (int, optional): kick2. Defaults to 0.
+        verbose (bool, optional): display additional info. Defaults to False.
+        use_cpp (bool, optional): use the C++ extensions if available. Defaults to True.
+
+    Raises:
+        InvalidArguments: xs must be nonempty list of tuples of torch tensors.
+        NotImplementedError: C++ extensions not available
+
+    Returns:
+        _type_: torchtt.TT
+    """
     if not isinstance(xs, list) or len(xs) == 0 or not all([isinstance(xs[i], tuple) for i in range(len(xs))]): 
         raise InvalidArguments("xs must be nonempty list of tuples of torch tensors.")
     
@@ -168,7 +206,7 @@ def amen_hadamard(xs, eps = 1e-10, nswp=20, y0 = None, rmax=999999, kickrank=4, 
     is_ttm = xs[0][0].is_ttm
     use_cpp = False
     if use_cpp and _flag_use_cpp:
-        raise NotImplementedError()
+        raise NotImplementedError("C++ extensions not available")
         # cores = torchttcpp.amen_solve(A_cores, B_cores, x_cores, b.N, A.R, b.R, x_R, nswp, eps, rmax, max_full, kickrank, kick2, local_iterations, resets, verbose, prec)
         # return torchtt.TT(list(cores))
     else:
