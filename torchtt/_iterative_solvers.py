@@ -119,11 +119,10 @@ def gmres( LinOp, b, x0, N, max_iterations, threshold):
         # print('time 1',tme, ' k',k,' size ',q.shape[0])
         
         tme = datetime.datetime.now()
-        for i in range(k+1):
-            H[i,k] = tn.dot(q.squeeze(),Q[:,i])
-            q = q - tn.reshape(H[i,k]*Q[:,i],[-1,1])
-            # H[i,k] = tn.sum(q*Qs[i])
-            # q = q - H[i,k]*Qs[i]
+        for _ in range(2):
+            QCq = Q[:, :k+1].T @ q.squeeze()
+            H[:k+1, k] += QCq
+            q = q - tn.reshape(Q[:, :k+1] @ QCq, [-1, 1])
         h = tn.linalg.norm(q)
         # tme = datetime.datetime.now() - tme
         # print('time 2',tme)
