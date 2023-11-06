@@ -1,6 +1,7 @@
 import torch as tn 
 import opt_einsum as oe 
 import torch.nn.functional as tnf
+import string 
 
 def _local_AB(Phi_left, Phi_right, coreA, coreB, bandA=-1, bandB=-1):
     """
@@ -91,6 +92,8 @@ def _compute_phi_AB(order, Phi_now, coreA, coreB, core, bandA=-1, bandB=-1):
             cores = tn.stack([tnf.pad(core[:, :, :i, :], (0, 0, -i, 0)) for i in range(-bandB, 0)] +
                              [tnf.pad(core[:, :, i:, :], (0, 0, 0, i)) for i in range(0, bandB+1)])
             Phi = oe.contract(sizes, Phi_now, coreA, diagonals_B, cores)
+            path = oe.contract_path(sizes, Phi_now, coreA, diagonals_B, cores)
+            # print(path[1])
     else:
         if order == 'bck':
             sizes = 'RAB,laAk,bknB,lrknR->rab'
@@ -501,3 +504,137 @@ class mm_multiple_local_op():
                 for i in range(self.len):
                     self.phis_y[i][k+1] /= nrm_phi
         return nrm_phi
+
+class hadamard_multiple_local_op():
+
+    def __init__(self, tensors, d, has_z):
+        self.tensors = [[[tensors[i][j].cores[k] for j in range(len(tensors[i]))] for k in range(d)] for i in range(len(tensors))]
+        self.has_z = has_z
+        self.len = len(tensors)
+        self.d = d
+        self.ttm = tensors[0][0].is_ttm 
+        dt = tensors[0][0].cores[0].dtype
+        dev = tensors[0][0].cores[0].device
+        self.phis_y = [[tn.ones([1]*(len(tensors[i])+1), device=dev, dtype=dt)] + [None]*(d-1) + [tn.ones([1]*(len(tensors[i])+1), device=dev, dtype=dt)] for i in range(self.len)]
+        if has_z:
+            self.phis_z = [[tn.ones([1]*(len(tensors[i])+1), device=dev, dtype=dt)] + [None]*(d-1) + [tn.ones([1]*(len(tensors[i])+1), device=dev, dtype=dt)] for i in range(self.len)]
+
+
+    def b_fun(self, k, first, second):
+
+        ss = 0
+        for i in range(self.len):
+            str_range = string.ascii_lowercase[:len(self.tensors[i][k])]
+            if self.ttm:
+                str_idx = 'y'+str_range+',Y'+str_range.upper()+','+(','.join([s+'mn'+s.upper() for s in str_range]))+'->ymnY'
+            else:
+                str_idx = 'y'+str_range+',Y'+str_range.upper()+','+(','.join([s+'n'+s.upper() for s in str_range]))+'->ynY'
+            ss += oe.contract(str_idx, self.phis_y[i][k] if first == 'y' else self.phis_z[i][k], self.phis_y[i][k+1] if second == 'y' else self.phis_z[i][k+1], *self.tensors[i][k])
+        return ss
+            
+    def update_phi_z(self, z, k, mode, norm, return_norm):
+
+        if mode == 'rl':
+            nrms = []
+            for i in range(self.len):
+                str_range = string.ascii_lowercase[:len(self.tensors[i][k])]
+                if self.ttm:
+                    str_idx = 'Y'+str_range.upper()+',ymnY,'+(','.join([s+'mn'+s.upper() for s in str_range]))+'->y'+str_range
+                else:
+                    str_idx = 'Y'+str_range.upper()+',ynY,'+(','.join([s+'n'+s.upper() for s in str_range]))+'->y'+str_range
+                phi = oe.contract(str_idx, self.phis_z[i][k+1], z, *self.tensors[i][k])
+                # phi = _compute_phi_AB('bck', self.phis_z[i][k+1], self.As[i].cores[k], self.Bs[i].cores[k], z, self.bandsA[i][k], self.bandsB[i][k])
+                # phi = oe.contract(
+                #    'ZAB,amkA,bknB,zmnZ->zab', self.phis_z[i][k+1], self.As[i].cores[k], self.Bs[i].cores[k], z)
+                if return_norm:
+                    nrm_phi = tn.linalg.norm(phi)
+                    nrms.append(nrm_phi)
+
+                if norm != 1:
+                    phi = phi / norm
+                self.phis_z[i][k] = phi.clone()
+            if return_norm:
+                nrm_phi = max(nrms)
+                for i in range(self.len):
+                    self.phis_z[i][k] /= nrm_phi
+            else:
+                nrm_phi = 1
+        else:
+            nrms = []
+            for i in range(self.len):
+                str_range = string.ascii_lowercase[:len(self.tensors[i][k])]
+                if self.ttm:
+                    str_idx = 'y'+str_range+',ymnY,'+(','.join([s+'mn'+s.upper() for s in str_range]))+'->Y'+str_range.upper()
+                else:
+                    str_idx = 'y'+str_range+',ynY,'+(','.join([s+'n'+s.upper() for s in str_range]))+'->Y'+str_range.upper()
+                phi = oe.contract(str_idx, self.phis_z[i][k], z, *self.tensors[i][k])
+                # phi = _compute_phi_AB('fwd', self.phis_z[i][k], self.As[i].cores[k], self.Bs[i].cores[k], z, self.bandsA[i][k], self.bandsB[i][k])
+                #phi = oe.contract('zab,zmnZ,amkA,bknB->ZAB',
+                #                self.phis_z[i][k], z, self.As[i].cores[k], self.Bs[i].cores[k])
+                if return_norm:
+                    nrm_phi = tn.linalg.norm(phi)
+                    nrms.append(nrm_phi)
+                if norm != 1:
+                    phi = phi / norm
+                self.phis_z[i][k+1] = phi.clone()
+            
+            if return_norm:
+                nrm_phi = max(nrms)
+                for i in range(self.len):
+                    self.phis_z[i][k+1] /= nrm_phi
+            else:
+                nrm_phi = 1
+        return nrm_phi
+
+    def update_phi_y(self, y, k, mode, norm, return_norm):
+
+        if mode == 'rl':
+            nrms = []
+            for i in range(self.len):
+                str_range = string.ascii_lowercase[:len(self.tensors[i][k])]
+                if self.ttm:
+                    str_idx = 'Y'+str_range.upper()+',ymnY,'+(','.join([s+'mn'+s.upper() for s in str_range]))+'->y'+str_range
+                else:
+                    str_idx = 'Y'+str_range.upper()+',ynY,'+(','.join([s+'n'+s.upper() for s in str_range]))+'->y'+str_range
+                phi = oe.contract(str_idx, self.phis_y[i][k+1], y, *self.tensors[i][k])
+                
+                #phi = _compute_phi_AB('bck', self.phis_y[i][k+1], self.As[i].cores[k], self.Bs[i].cores[k], y, self.bandsA[i][k], self.bandsB[i][k])
+                #phi = oe.contract(
+                #    'YAB,amkA,bknB,ymnY->yab', self.phis_y[i][k+1], self.As[i].cores[k], self.Bs[i].cores[k], y)
+                if return_norm:
+                    nrm_phi = tn.linalg.norm(phi)
+                    nrms.append(nrm_phi)
+
+                if norm != 1:
+                    phi = phi / norm
+                self.phis_y[i][k] = phi.clone()
+            
+            if return_norm:
+                nrm_phi = max(nrms)
+                for i in range(self.len):
+                    self.phis_y[i][k] /= nrm_phi
+        else:
+            nrms = []
+            for i in range(self.len):
+                str_range = string.ascii_lowercase[:len(self.tensors[i][k])]
+                if self.ttm:
+                    str_idx = 'y'+str_range+',ymnY,'+(','.join([s+'mn'+s.upper() for s in str_range]))+'->Y'+str_range.upper()
+                else:
+                    str_idx = 'y'+str_range+',ynY,'+(','.join([s+'n'+s.upper() for s in str_range]))+'->Y'+str_range.upper()
+                phi = oe.contract(str_idx, self.phis_y[i][k], y, *self.tensors[i][k])
+                #phi = _compute_phi_AB('fwd', self.phis_y[i][k], self.As[i].cores[k], self.Bs[i].cores[k], y, self.bandsA[i][k], self.bandsB[i][k])
+                #phi = oe.contract('yab,ymnY,amkA,bknB->YAB',
+                #                self.phis_y[i][k], y, self.As[i].cores[k], self.Bs[i].cores[k])
+                if return_norm:
+                    nrm_phi = tn.linalg.norm(phi)
+                    nrms.append(nrm_phi)
+
+                if norm != 1:
+                    phi = phi / norm
+                self.phis_y[i][k+1] = phi.clone()
+            if return_norm:
+                nrm_phi = max(nrms)
+                for i in range(self.len):
+                    self.phis_y[i][k+1] /= nrm_phi
+        return nrm_phi
+

@@ -16,12 +16,12 @@ namespace AMEn
             if (phi_prev.sizes()[0] > phi_prev.sizes()[1])
             {
                 auto tmp = at::tensordot(phi_prev, z, {0}, {0}); // ynZ
-                return at::tensordot(tmp, y, {0, 1}, {0, 1}); // ZY
+                return at::tensordot(tmp, y, {0, 1}, {0, 1});    // ZY
             }
             else
             {
                 auto tmp = at::tensordot(phi_prev, y, {1}, {0}); // znY
-                return at::tensordot(z, tmp, {0, 1}, {0, 1}); // ZY
+                return at::tensordot(z, tmp, {0, 1}, {0, 1});    // ZY
             }
         }
         else
@@ -49,12 +49,12 @@ namespace AMEn
             if (phi_prev.sizes()[0] < phi_prev.sizes()[1])
             {
                 auto tmp = at::tensordot(z, phi_prev, {2}, {1}); // znZ, YZ ->znY
-                return at::tensordot(y, tmp, {1, 2}, {1, 2}); // ynY, znY -> yz
+                return at::tensordot(y, tmp, {1, 2}, {1, 2});    // ynY, znY -> yz
             }
             else
             {
                 auto tmp = at::tensordot(y, phi_prev, {2}, {0}); // ynY, YZ -> ynZ
-                return at::tensordot(tmp, z, {1, 2}, {1, 2}); // ynZ, znZ -> yz
+                return at::tensordot(tmp, z, {1, 2}, {1, 2});    // ynZ, znZ -> yz
             }
         }
         else
@@ -91,7 +91,7 @@ namespace AMEn
         std::vector<at::Tensor> cores_z(d);
         std::vector<int64_t> ry(d + 1);
         std::vector<int64_t> rz(d + 1);
-        std::vector<at::Tensor> phizy(d+1);
+        std::vector<at::Tensor> phizy(d + 1);
 
         if (y.size() == 0)
         {
@@ -118,7 +118,6 @@ namespace AMEn
             ry[d] = 1;
         }
 
-
         if (kickrank + kickrank2 > 0)
         {
             if (z.size() == 0)
@@ -126,7 +125,7 @@ namespace AMEn
                 rz[d] = 1;
                 rz[0] = 1;
                 for (int32_t i = 1; i < d; ++i)
-                    rz[i] = kickrank+kickrank2;
+                    rz[i] = kickrank + kickrank2;
 
                 for (int32_t i = 0; i < d; ++i)
                 {
@@ -145,8 +144,8 @@ namespace AMEn
                 }
                 rz[d] = 1;
             }
-            phizy[0] = torch::ones({1,1}, options);
-            phizy[d] = torch::ones({1,1}, options);
+            phizy[0] = torch::ones({1, 1}, options);
+            phizy[d] = torch::ones({1, 1}, options);
         }
 
         double *nrms = new double[d];
@@ -157,7 +156,7 @@ namespace AMEn
 
         if (verb > 0)
             std::cout << "Initial orhtogonalization" << std::endl;
-        for (int32_t i = 0; i < d-1; ++i)
+        for (int32_t i = 0; i < d - 1; ++i)
         {
             if (init_qr)
             {
@@ -200,7 +199,8 @@ namespace AMEn
             {
                 if (((direct < 0) && (i == d - 1)) || ((direct > 0) && (i == 0)))
                 {
-                    std::cout << "Sweep " << swp << ", direction " << direct << std::endl << std::flush;
+                    std::cout << "Sweep " << swp << ", direction " << direct << std::endl
+                              << std::flush;
                     tme_swp = std::chrono::high_resolution_clock::now();
                 }
             }
@@ -274,7 +274,7 @@ namespace AMEn
                 {
                     at::Tensor crz2;
                     std::tie(crz2, std::ignore) = at::linalg_qr(crz);
-                    rz[i+1] = crz2.sizes()[1];
+                    rz[i + 1] = crz2.sizes()[1];
                     if (ttm)
                         cores_z[i] = crz2.reshape({rz[i], M[i], N[i], rz[i + 1]});
                     else
@@ -295,7 +295,6 @@ namespace AMEn
                 at::Tensor u = std::get<0>(USV).index({torch::indexing::Ellipsis, torch::indexing::Slice(0, r, 1)}) * std::get<1>(USV).index({torch::indexing::Slice(0, r, 1)});
                 at::Tensor crz;
 
-                
                 if (kickrank + kickrank2 > 0)
                 {
                     at::Tensor cry = at::tensordot(u, v, {1}, {1}).reshape({ry[i], -1});
@@ -309,7 +308,6 @@ namespace AMEn
 
                     double nrmz = torch::norm(crz).item<double>();
 
-                    
                     if (kickrank2 > 0)
                     {
                         std::tie(std::ignore, std::ignore, crz) = at::linalg_svd(crz, false);
@@ -318,7 +316,6 @@ namespace AMEn
                         crz = at::cat({crz, torch::randn({kickrank2, crz.sizes()[1]}, options)}, 0);
                     }
 
-                    
                     auto crs = contractor.b_fun(i, 'z', 'y').reshape({rz[i], -1});
                     crs = crs / nrms[i] - ys;
 
@@ -334,7 +331,7 @@ namespace AMEn
                 }
                 if (ttm)
                 {
-                    
+
                     cores_y[i - 1] = at::tensordot(cores_y[i - 1], u, {3}, {0}).reshape({ry[i - 1], M[i - 1], N[i - 1], r});
                     cores_y[i] = v.t().reshape({r, M[i], N[i], ry[i + 1]});
                 }
@@ -344,7 +341,7 @@ namespace AMEn
                     cores_y[i] = v.t().reshape({r, N[i], ry[i + 1]});
                 }
                 ry[i] = r;
-                
+
                 nrms[i] = contractor.update_phi_y(cores_y[i], i, "rl", 1, true);
 
                 if (kickrank + kickrank2 > 0)
