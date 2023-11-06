@@ -86,7 +86,7 @@ def gmres( LinOp, b, x0, N, max_iterations, threshold):
 
     converged = False
     
-    r = b - LinOp.matvec(x0)
+    r = (b - LinOp.matvec(x0)).squeeze()
     
     b_norm = tn.linalg.norm(b)
     error = tn.linalg.norm(r) / b_norm
@@ -102,9 +102,8 @@ def gmres( LinOp, b, x0, N, max_iterations, threshold):
     if not r_norm>0:
         return x0, True, 0
 
-    Q = tn.zeros((N,max_iterations+1), dtype = b.dtype, device = b.device) 
-    Q[:,0] = r[:,0] / r_norm
-    # Qs = [r/r_norm]
+    Q = tn.empty((N,max_iterations+1), dtype = b.dtype, device = b.device) 
+    Q[:,0] = r / r_norm
     H = tn.zeros((max_iterations+1,max_iterations), dtype = b.dtype, device = b.device)
     
     beta = r_norm * e1
@@ -112,17 +111,16 @@ def gmres( LinOp, b, x0, N, max_iterations, threshold):
     for k in range(max_iterations):
         
         tme = datetime.datetime.now()
-        q = LinOp.matvec(Q[:,k])
-        # q = LinOp.matvec(Qs[k])
+        q = LinOp.matvec(Q[:,k]).squeeze()
         tme = datetime.datetime.now() - tme
         # print()
         # print('time 1',tme, ' k',k,' size ',q.shape[0])
         
         tme = datetime.datetime.now()
         for _ in range(2):
-            QCq = Q[:, :k+1].T @ q.squeeze()
+            QCq = Q[:, :k+1].T @ q
             H[:k+1, k] += QCq
-            q = q - tn.reshape(Q[:, :k+1] @ QCq, [-1, 1])
+            q = q - Q[:, :k+1] @ QCq
         h = tn.linalg.norm(q)
         # tme = datetime.datetime.now() - tme
         # print('time 2',tme)
@@ -130,8 +128,7 @@ def gmres( LinOp, b, x0, N, max_iterations, threshold):
         tme = datetime.datetime.now()
         q = q / h
         H[k+1,k] = h
-        Q[:,k+1] = q[:,0]
-        # Qs.append(q.clone())
+        Q[:,k+1] = q
         tme2 = datetime.datetime.now()
         h, c, s = apply_givens_rotation(H[:(k+2),k]+0,cs,sn,k+1)
         tme2 = datetime.datetime.now() - tme2
@@ -140,7 +137,6 @@ def gmres( LinOp, b, x0, N, max_iterations, threshold):
         sn[k] = s
        
         tme = datetime.datetime.now() - tme
-        # print('time 3',tme,' time 32', tme2)
         
         beta[k+1] = -sn[k]*beta[k]
         beta[k] = cs[k]*beta[k]
@@ -152,8 +148,6 @@ def gmres( LinOp, b, x0, N, max_iterations, threshold):
             break
     y = tn.linalg.solve(H[:k+1,:k+1],tn.reshape(beta[:k+1],[-1,1]))
     x = x0 + Q[:,:k+1] @ y     
-    # for i in range(k+1):
-    #   x = x0+Qs[i]*y[i]
     return x, converged, k
     
 

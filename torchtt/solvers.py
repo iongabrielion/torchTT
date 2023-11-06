@@ -8,7 +8,7 @@ import numpy as np
 import torchtt
 import datetime
 from torchtt._decomposition import QR, SVD, lr_orthogonal, rl_orthogonal
-from torchtt._iterative_solvers import BiCGSTAB_reset, gmres_restart
+from torchtt._iterative_solvers import BiCGSTAB_reset, gmres_restart, gmres
 import opt_einsum as oe
 from .errors import *
 import torch.nn.functional as tnf
@@ -50,18 +50,29 @@ def _local_product(Phi_right_list, Phi_left_list, Summ_data, x):
     for data, band, j in Summ_data:
         if band < 0:
             # data is a full core
-            tmp = tn.tensordot(Phi_right_list[j], x, ([2], [2])) # LSR, rnR -> LSrn
-            tmp = tn.tensordot(data, tmp, ([2, 3], [3, 1])) # smnS, LSrn -> smLr
-            w += tn.tensordot(Phi_left_list[j], tmp, ([1, 2], [0, 3])) # lsr, smLr -> lmL
+            if x.shape[-1] >= x.shape[0]:
+                tmp = tn.tensordot(Phi_right_list[j], x, ([2], [2])) # LSR, rnR -> LSrn
+                tmp = tn.tensordot(data, tmp, ([2, 3], [3, 1])) # smnS, LSrn -> smLr
+                w += tn.tensordot(Phi_left_list[j], tmp, ([2, 1], [3, 0])) # lsr, smLr -> lmL
+            else:
+                tmp = tn.tensordot(Phi_left_list[j], x, ([2], [0])) # lsr, rnR -> lsnR
+                tmp = tn.tensordot(tmp, data, ([2, 1], [2, 0])) # lsnR smnS -> lRmS
+                w += tn.tensordot(tmp, Phi_right_list[j], ([3, 1], [1, 2])) # lRmS, LSR -> lmL
         else:
             # data is diagonals of a core
-            tmp = tn.tensordot(Phi_right_list[j], x, ([2], [2])) # LSR, rnR -> LSrn
-            tmp = tn.einsum('ksSn, LSrn -> ksnLr', data, tmp)
-            tmp = tn.tensordot(Phi_left_list[j], tmp, ([1, 2], [1, 4])) # lsr, ksnLr -> lknL
+            if x.shape[-1] >= x.shape[0]:
+                tmp = tn.tensordot(Phi_right_list[j], x, ([2], [2])) # LSR, rnR -> LSrn
+                tmp = tn.einsum('ksSn, LSrn -> ksnLr', data, tmp)
+                tmp = tn.tensordot(Phi_left_list[j], tmp, ([2, 1], [4, 1])) # lsr, ksnLr -> lknL
+            else:
+                tmp = tn.tensordot(Phi_left_list[j], x, ([2], [0])) # lsr, rnR -> lsnR
+                tmp = tn.einsum('lsnR, ksSn -> lRkSn', tmp, data)
+                tmp = tn.tensordot(tmp, Phi_right_list[j], ([3, 1], [1, 2])) # lRkSn, LSR -> lknL
             w += tmp[:, band, ...]
             for i in range(1, band+1):
                 w[:, :-i, :] += tmp[:, i + band,  i:, :]
                 w[:, i:, :] += tmp[:, -i + band, :-i, :]
+        
     return w
 
 
@@ -71,156 +82,82 @@ class _LinearOp():
         self.shape = shape
         self.prec = prec
         self.summ_data = Summ_data
-        self.Phi_left_list = Phi_left_list
-        self.Phi_right_list = Phi_right_list
-            
+        self.expressions = []
+        for data, band, j in Summ_data:
+            x_shape = (Phi_left_list[j].shape[-1], data.shape[2] if band < 0 else data.shape[-1], Phi_right_list[j].shape[-1])
+            sizes = 'lsr, smnS, LSR, rnR-> lmL' if band < 0 else 'lsr, ksSn, LSR, rnR ->klnL'
+            expr = oe.contract_expression(sizes,
+                                          Phi_left_list[j], data, Phi_right_list[j], 
+                                          x_shape,
+                                          constants=[0, 1, 2])
+            self.expressions.append(expr)
         if prec == 'c':
-            self.J = tn.zeros(Phi_left_list[0].shape[-1], Phi_right_list[0].shape[-1], A_shape[1], A_shape[2],
+            J = tn.zeros(Phi_left_list[0].shape[-1], Phi_right_list[0].shape[-1], A_shape[1], A_shape[2],
                               dtype=Phi_left_list[0].dtype, device=Phi_left_list[0].device)
             for data, band, j in Summ_data:
                 if band < 0:
                     tmp = tn.tensordot(tn.diagonal(Phi_right_list[j], 0, 0, 2), data, ([0], [3])) # SD, smnS -> Dsmn
-                    self.J += tn.tensordot(tn.diagonal(Phi_left_list[j], 0, 0, 2), tmp, ([0], [1])) # sd, Dsmn -> dDmn
+                    J += tn.tensordot(tn.diagonal(Phi_left_list[j], 0, 0, 2), tmp, ([0], [1])) # sd, Dsmn -> dDmn
                 else:
                     diags_J = tn.tensordot(data, tn.diagonal(Phi_right_list[j], 0, 0, 2), ([2], [0])) #ksSn, SD -> ksnD
                     diags_J = tn.tensordot(diags_J, tn.diagonal(Phi_left_list[j], 0, 0, 2), ([1], [0])) #ksnD, sd -> knDd
-                    diag_i_J = tn.diagonal(self.J, 0, 2, 3)
+                    diag_i_J = tn.diagonal(J, 0, 2, 3)
                     diag_i_J += tn.permute(diags_J[ band, ...], (2, 1, 0))
                     for i in range(1, band+1):
-                        diag_i_J = tn.diagonal(self.J, i, 2, 3)
+                        diag_i_J = tn.diagonal(J, i, 2, 3)
                         diag_i_J += tn.permute(diags_J[i + band, :-i, ...], (2, 1, 0))
                     for i in range(-band, 0):
-                        diag_i_J = tn.diagonal(self.J, i, 2, 3)
+                        diag_i_J = tn.diagonal(J, i, 2, 3)
                         diag_i_J += tn.permute(diags_J[i + band, -i:, ...], (2, 1, 0))
-            self.J = tn.linalg.inv(self.J)
-            
-            self.contraction = (shape[0]*shape[1]*shape[2] > 1e5)
+            J = tn.linalg.inv(J)
+            self.precond_expression = oe.contract_expression('rRmn, rnR->rmR', 
+                                                             J, (J.shape[0], J.shape[3], J.shape[1]), constants=[0])
             
         elif prec == 'r':
-            self.J = tn.zeros(Phi_left_list[0].shape[-1], A_shape[1], Phi_right_list[0].shape[0], A_shape[2], Phi_right_list[0].shape[-1],
+            J = tn.zeros(Phi_left_list[0].shape[-1], A_shape[1], Phi_right_list[0].shape[0], A_shape[2], Phi_right_list[0].shape[-1],
                               dtype=Phi_left_list[0].dtype, device = Phi_left_list[0].device)
             for data, band, j in Summ_data:
                 if band < 0:
-                    self.J += tn.einsum('sd,smnS, LSR->dmLnR', tn.diagonal(Phi_left_list[j], 0, 0, 2), data, Phi_right_list[j])
+                    J += tn.einsum('sd,smnS, LSR->dmLnR', tn.diagonal(Phi_left_list[j], 0, 0, 2), data, Phi_right_list[j])
                 else:
                     diags_J = tn.einsum('sd,ksSn, LSR->kdLRn', tn.diagonal(Phi_left_list[j], 0, 0, 2), data, Phi_right_list[j])
                     for i in range(-band, band+1):
-                        diag_i_J = tn.diagonal(self.J, i, 1, 3)
+                        diag_i_J = tn.diagonal(J, i, 1, 3)
                         if i > 0:
                             diag_i_J += diags_J[i + band, ..., :-i]
                         else:
                             diag_i_J += diags_J[i + band, ..., -i:]
-            sh = self.J.shape
-            self.J = tn.reshape(self.J, [-1, self.J.shape[1]*self.J.shape[2], self.J.shape[3]*self.J.shape[4]])
-            self.J = tn.reshape(tn.linalg.inv(self.J), sh)
-                
-            self.contraction = (shape[0]*shape[1]*shape[2] > 2*1e4)
+            sh = J.shape
+            J = tn.reshape(J, [-1, J.shape[1] * J.shape[2], J.shape[3] * J.shape[4]])
+            J = tn.reshape(tn.linalg.inv(J), sh)
+            self.precond_expression = oe.contract_expression('rnR,rmLnR->rmL', 
+                                                            (J.shape[0], J.shape[-2], J.shape[-1]), J, constants=[1])
         else:
             pass
 
     def apply_prec(self, x):
-        if self.prec == 'c':
-            y = tn.einsum('rRmn, rnR->rmR', self.J, x)
-            return y
-        elif self.prec == 'r':
-            y = tn.einsum('rnR,rmLnR->rmL', x, self.J)
-            return y.reshape(x.shape)
+        return self.precond_expression(x)
 
     def matvec(self, x, apply_prec=True):
-        x = x.reshape(self.shape)
+        y = x.reshape(self.shape)
         w = 0
-        if self.prec == None or not apply_prec:
-            for data, band, j in self.summ_data:
-                if band >= 0:
-                    # data is diagonals of core
-                    if (x.shape[-1] > x.shape[0]):
-                        tmp = tn.einsum('lsr, ksSn, LSR, rnR ->lknL',self.Phi_left_list[j], data,  self.Phi_right_list[j], x)
-                        w += tmp[:, band, ...]
-                        for i in range(1, band+1):
-                            w[:, :-i, :] += tmp[:, i + band, i:, ...]
-                            w[:, i:, :] += tmp[:, -i + band, :-i, ...]
-                        # tmp = tn.tensordot(self.Phi_right_list[j], x, ([2], [2])) # 'LSR, rnR -> LSrn'
-                        # tmp = tn.einsum('ksSn, LSrn -> ksnLr', data, tmp)
-                        # tmp = tn.einsum('lsr, ksnLr ->klnL', self.Phi_left_list[j], tmp)
-                        # w += tmp[band, ...]
-                        # for i in range(1, band+1):
-                        #     w[:, :-i, :] += tmp[i + band, :, i:, :]
-                        #     w[:, i:, :] += tmp [-i + band, :, :-i, :]
-                    else:
-                        tmp = tn.einsum('lsr, ksSn, LSR, rnR ->lknL',self.Phi_left_list[j], data,  self.Phi_right_list[j], x)
-                        # tmp = tn.tensordot(x, self.Phi_left_list[j], ([0], [2])) # rnR,lsr-> nRls
-                        # tmp = tn.einsum('nRls,ksSn -> RlkSn', tmp, data)
-                        # tmp = tn.tensordot(tmp, self.Phi_right_list[j], ([3, 0], [1, 2])) #RlkSn, LSR->lknL
-                        w += tmp[:, band, ...]
-                        for i in range(1, band+1):
-                            w[:, :-i, :] += tmp[:, i + band, i:, ...]
-                            w[:, i:, :] += tmp[:, -i + band, :-i, ...]
-                        
-                else:
-                    # data is a full core
-                    if (x.shape[-1] > x.shape[0]):
-                        tmp = tn.tensordot(self.Phi_right_list[j], x, ([2], [2])) # 'LSR, rnR -> LSrn'
-                        tmp = tn.tensordot(data, tmp, ([2, 3], [3, 1])) #'smnS, LSrn -> smLr'
-                        w += tn.tensordot(self.Phi_left_list[j], tmp, ([1, 2], [0, 3])) #'lsr, smLr -> lmL'
-                    else:
-                        tmp = tn.tensordot(x, self.Phi_left_list[j], ([0], [2])) # rnR,lsr-> nRls
-                        tmp = tn.tensordot(tmp, data, ([0, 3], [2, 0])) # nRls,smnS->RlmS
-                        w += tn.tensordot(tmp, self.Phi_right_list[j], ([0, 3], [2, 1]))  # RlmS,LSR->lmL
-                        
-
-        elif self.prec == 'c' or self.prec == 'r':
-            if self.contraction:
-                for data, band, j in self.summ_data:
-                    if band < 0:
-                        w += tn.einsum('lsr,smnS,LSR,rab,rnRab->lmL' if self.prec == 'r' else 'lsr,smnS,LSR,raR,rRna->lmL', 
-                                         self.Phi_left_list[j], data, self.Phi_right_list[j], x, self.J)
-                    else:
-                        tmp = tn.einsum('lsr,ksSn,LSR,rab,rnRab->klnL' if self.prec == 'r' else 'lsr,ksSn,LSR,raR,rRna->klnL',
-                                               self.Phi_left_list[j], data, self.Phi_right_list[j], x, self.J)
-                        w += tmp[band, ...]
-                        for i in range(1, band+1):
-                            w[:, :-i, :] += tmp[i + band, :, i:, :]
-                            w[:, i:, :] += tmp[i + band, :, :-i, :]
+        if (self.prec is not None) and apply_prec:
+            if self.prec == 'c' or self.prec == 'r':
+                y = self.apply_prec(y)
             else:
-                y = self.apply_prec(x)
-                for data, band, j in self.summ_data:
-                    if band >= 0:
-                        tmp = tn.einsum('lsr, ksSn, LSR, rnR ->lknL',self.Phi_left_list[j], data,  self.Phi_right_list[j], y)
-                        w += tmp[:, band, ...]
-                        for i in range(1, band+1):
-                            w[:, :-i, :] += tmp[:, i + band, i:, ...]
-                            w[:, i:, :] += tmp[:, -i + band, :-i, ...]
-                        # data is diagonals of core
-                        #if (y.shape[-1] > y.shape[0]):
-                            # tmp = tn.tensordot(self.Phi_right_list[j], y, ([2], [2])) # 'LSR, rnR -> LSrn'
-                            # tmp = tn.einsum('ksSn, LSrn -> knLsr', data, tmp)
-                            # tmp = tn.tensordot(tmp, self.Phi_left_list[j], ([3, 4], [1, 2])) #'knLsr, lsr->knLl'
-                            # w += tn.permute(tmp[band, ...], (2, 0, 1))
-                            # for i in range(1, band+1):
-                            #     w[:, :-i, :] += tn.permute(tmp[i + band, i:, ...], (2, 0, 1))
-                            #     w[:, i:, :] += tn.permute(tmp[-i + band, :-i, ...], (2, 0, 1))
-                        #else:
-                            # tmp = tn.tensordot(y, self.Phi_left_list[j], ([0], [2])) # rnR,lsr-> nRls
-                            # tmp = tn.einsum('ksSn, nRls -> knlSR', data, tmp)
-                            # tmp = tn.tensordot(tmp, self.Phi_right_list[j], ([3, 4], [1, 2])) #'knlSR, LSR->knlL'
-                            # w += tn.permute(tmp[band, ...], (1, 0, 2))
-                            # for i in range(1, band+1):
-                            #     w[:, :-i, :] += tn.permute(tmp[i + band, i:, ...], (1, 0, 2))
-                            #     w[:, i:, :] += tn.permute(tmp[-i + band, :-i, ...], (1, 0, 2))
-                    else:
-                        # data is a full core
-                        if (y.shape[-1] > y.shape[0]):
-                            tmp = tn.tensordot(self.Phi_right_list[j], y, ([2], [2])) # 'LSR, rnR -> LSrn'
-                            tmp = tn.tensordot(data, tmp, ([2, 3], [3, 1])) #'smnS, LSrn -> smLr'
-                            w += tn.tensordot(self.Phi_left_list[j], tmp, ([1, 2], [0, 3])) #'lsr, smLr -> lmL'
-                        else:
-                            tmp = tn.tensordot(y, self.Phi_left_list[j], ([0], [2])) # rnR,lsr-> nRls
-                            tmp = tn.tensordot(tmp, data, ([0, 3], [2, 0])) # nRls,smnS->RlmS
-                            w += tn.tensordot(tmp, self.Phi_right_list[j], ([0, 3], [2, 1]))  # RlmS,LSR->lmL                 
-        else:
-            raise Exception('Preconditioner '+str(self.prec)+' not defined.')
+                raise Exception('Preconditioner '+str(self.prec)+' not defined.')
+        for _, band, j in self.summ_data:
+            if band >= 0:
+                # data is diagonals of core
+                tmp = self.expressions[j](y)
+                w += tmp[band, ...]
+                for i in range(1, band+1):
+                    w[:, :-i, :] += tmp[i + band, :, i:, :]
+                    w[:, i:, :] += tmp[-i + band, :, :-i, :]
+            else:
+                # data is a full core
+                w += self.expressions[j](y)
         return tn.reshape(w, [-1, 1])
-
 def amen_solve(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=32768, max_full=500, kickrank=4, kick2=0, trunc_norm='res', local_solver=1, local_iterations=40, resets=2, verbose=False, preconditioner=None, use_cpp=True, use_single_precision=False, bandsMatrices=None):
     """
     Solve a multilinear system :math:`\\mathsf{Ax} = \\mathsf{b}` in the Tensor Train format.
@@ -602,7 +539,7 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
                     time_local = datetime.datetime.now() - time_local
                     print('\t\tTime needed ', time_local)
             # residual damp check
-            if res_old/res_new < damp and res_new > real_tol:
+            if res_old / res_new < damp and res_new > real_tol:
                 if verbose:
                     print('WARNING: residual increases. res_old %g, res_new %g, real_tol %g' % (
                         res_old, res_new, real_tol))  # warning (from tt toolbox)
@@ -779,24 +716,32 @@ def _compute_phi_A(order, Phi_now_list, core_left, Summ_data, core_right):
             if order == 'bck':
                 tmp = tn.tensordot(Phi_now_list[j], core_right, ([2], [2])) # LSR, rNR -> LSrN
                 tmp = tn.tensordot(data, tmp, ([2, 3], [3, 1])) # sMNS LSrN -> sMLr
-                tmp = tn.tensordot(core_left, tmp, ([1, 2], [1, 2])) #lML, sMLr -> lsr
-                Phi_list.append(tmp)
+                tmp = tn.tensordot(core_left, tmp, ([2, 1], [2, 1])) #lML, sMLr -> lsr
             elif order == 'fwd':
                 tmp = tn.tensordot(Phi_now_list[j], core_right, ([2], [0])) #lsr rNR -> lsNR
-                tmp = tn.tensordot(data, tmp, ([0, 2], [1, 2])) # sMNS lsNR -> MSlR
+                tmp = tn.tensordot(data, tmp, ([2, 0], [2, 1])) # sMNS lsNR -> MSlR
                 tmp = tn.tensordot(core_left, tmp, ([0, 1], [2, 0])) # lML, MSlR -> LSR 
-                Phi_list.append(tmp)
+            Phi_list.append(tmp)
         else:            
-            cores_left = tn.stack([tnf.pad(core_left[:, -i:, :], (0, 0, 0, -i)) for i in range(-band, 1)] + 
-                                  [tnf.pad(core_left[:, :-i, :], (0, 0, i, 0)) for i in range(1, band+1)])
-
             # data is diagonals of a core
             if order == 'bck':
+                cores_left = tn.stack([tnf.pad(core_left[:, -i:, :], (0, 0, 0, -i)) for i in range(-band, 1)] + 
+                                      [tnf.pad(core_left[:, :-i, :], (0, 0, i, 0)) for i in range(1, band+1)])
                 Phi_list.append(tn.einsum('LSR,klNL,ksSN,rNR->lsr', Phi_now_list[j],
-                                                      cores_left, data, core_right))
+                                                     cores_left, data, core_right))
             elif order == 'fwd':
-                Phi_list.append(tn.einsum('lsr,zlKL,zsSK,rKR->LSR', Phi_now_list[j],
-                                                      cores_left, data, core_right))
+                tmp = tn.einsum('lsr,lNL,sSN,rNR->LSR', Phi_now_list[j],
+                                                      core_left, data[band, ...], core_right)
+                for i in range(1, band+1):
+                    tmp += tn.einsum('lsr,lNL,sSN,rNR->LSR', Phi_now_list[j],
+                                                      core_left[:, :-i, :], data[i + band, ..., i:], core_right[:, i:, :])
+                    tmp += tn.einsum('lsr,lNL,sSN,rNR->LSR', Phi_now_list[j],
+                                                      core_left[:, i:, :], data[-i + band, ..., :-i], core_right[:, :-i, :])
+                Phi_list.append(tmp)
+                # cores_left = tn.stack([tnf.pad(core_left[:, -i:, :], (0, 0, 0, -i)) for i in range(-band, 1)] + 
+                #                   [tnf.pad(core_left[:, :-i, :], (0, 0, i, 0)) for i in range(1, band+1)])
+                #Phi_list.append(tn.einsum('lsr,klNL,ksSN,rNR->LSR', Phi_now_list[j],
+                #                                       cores_left, data, core_right))
     return Phi_list
 
 
