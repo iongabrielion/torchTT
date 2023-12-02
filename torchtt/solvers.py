@@ -50,114 +50,117 @@ def _local_product(Phi_right_list, Phi_left_list, Summ_data, x):
     for data, band, j in Summ_data:
         if band < 0:
             # data is a full core
-            if x.shape[-1] >= x.shape[0]:
-                tmp = tn.tensordot(Phi_right_list[j], x, ([2], [2])) # LSR, rnR -> LSrn
-                tmp = tn.tensordot(data, tmp, ([2, 3], [3, 1])) # smnS, LSrn -> smLr
-                w += tn.tensordot(Phi_left_list[j], tmp, ([2, 1], [3, 0])) # lsr, smLr -> lmL
-            else:
-                tmp = tn.tensordot(Phi_left_list[j], x, ([2], [0])) # lsr, rnR -> lsnR
-                tmp = tn.tensordot(tmp, data, ([2, 1], [2, 0])) # lsnR smnS -> lRmS
-                w += tn.tensordot(tmp, Phi_right_list[j], ([3, 1], [1, 2])) # lRmS, LSR -> lmL
+            w += oe.contract('lsr, smnS, LSR, rnR -> lmL', 
+                              Phi_left_list[j], data, Phi_right_list[j], x)
         else:
             # data is diagonals of a core
-            if x.shape[-1] >= x.shape[0]:
-                tmp = tn.tensordot(Phi_right_list[j], x, ([2], [2])) # LSR, rnR -> LSrn
-                tmp = tn.einsum('ksSn, LSrn -> ksnLr', data, tmp)
-                tmp = tn.tensordot(Phi_left_list[j], tmp, ([2, 1], [4, 1])) # lsr, ksnLr -> lknL
-            else:
-                tmp = tn.tensordot(Phi_left_list[j], x, ([2], [0])) # lsr, rnR -> lsnR
-                tmp = tn.einsum('lsnR, ksSn -> lRkSn', tmp, data)
-                tmp = tn.tensordot(tmp, Phi_right_list[j], ([3, 1], [1, 2])) # lRkSn, LSR -> lknL
-            w += tmp[:, band, ...]
-            for i in range(1, band+1):
-                w[:, :-i, :] += tmp[:, i + band,  i:, :]
-                w[:, i:, :] += tmp[:, -i + band, :-i, :]
+            tmp = oe.contract('lsr, ksSn, LSR, rnR -> klnL',
+                               Phi_left_list[j], data, Phi_right_list[j], x)
+            w += tmp[band, ...]
+            for i in range(1, band + 1):
+                w[:, :-i, :] += tmp[i + band, :, i:, :]
+                w[:, i:, :] += tmp[-i + band, :, :-i, :]
         
     return w
 
 
 class _LinearOp():
-    def __init__(self, Phi_left_list, Phi_right_list, Summ_data, A_shape, shape, prec):
-        self.A_shape = A_shape
+    def __init__(self, Phi_left_list, Phi_right_list, Summ_data, shape, prec):
         self.shape = shape
         self.prec = prec
+        if prec is not None:
+            if prec == 'c' or prec == 'r':
+                self.prec = prec
+            else:
+                raise Exception('Preconditioner ' + str(prec) + ' not defined.')
         self.summ_data = Summ_data
         self.expressions = []
         for data, band, j in Summ_data:
-            x_shape = (Phi_left_list[j].shape[-1], data.shape[2] if band < 0 else data.shape[-1], Phi_right_list[j].shape[-1])
-            sizes = 'lsr, smnS, LSR, rnR-> lmL' if band < 0 else 'lsr, ksSn, LSR, rnR ->klnL'
+            sizes = 'lsr, smnS, LSR, rnR-> lmL' if band < 0 else 'lsr, ksSn, LSR, rnR -> klnL'
             expr = oe.contract_expression(sizes,
                                           Phi_left_list[j], data, Phi_right_list[j], 
-                                          x_shape,
+                                          shape,
                                           constants=[0, 1, 2])
             self.expressions.append(expr)
         if prec == 'c':
-            J = tn.zeros(Phi_left_list[0].shape[-1], Phi_right_list[0].shape[-1], A_shape[1], A_shape[2],
+            J = tn.zeros(Phi_left_list[0].shape[-1], Phi_right_list[0].shape[-1], shape[1], shape[1],
                               dtype=Phi_left_list[0].dtype, device=Phi_left_list[0].device)
             for data, band, j in Summ_data:
                 if band < 0:
-                    tmp = tn.tensordot(tn.diagonal(Phi_right_list[j], 0, 0, 2), data, ([0], [3])) # SD, smnS -> Dsmn
-                    J += tn.tensordot(tn.diagonal(Phi_left_list[j], 0, 0, 2), tmp, ([0], [1])) # sd, Dsmn -> dDmn
+                    J += oe.contract('sr, smnS, SR -> rRmn',
+                                     tn.diagonal(Phi_left_list[j], 0, 0, 2).contiguous(),
+                                     data,
+                                     tn.diagonal(Phi_right_list[j], 0, 0, 2).contiguous())
                 else:
-                    diags_J = tn.tensordot(data, tn.diagonal(Phi_right_list[j], 0, 0, 2), ([2], [0])) #ksSn, SD -> ksnD
-                    diags_J = tn.tensordot(diags_J, tn.diagonal(Phi_left_list[j], 0, 0, 2), ([1], [0])) #ksnD, sd -> knDd
-                    diag_i_J = tn.diagonal(J, 0, 2, 3)
-                    diag_i_J += tn.permute(diags_J[ band, ...], (2, 1, 0))
-                    for i in range(1, band+1):
+                    diags_J = oe.contract('sr, ksSn, SR -> krRn',
+                                     tn.diagonal(Phi_left_list[j], 0, 0, 2).contiguous(),
+                                     data,
+                                     tn.diagonal(Phi_right_list[j], 0, 0, 2).contiguous())
+                    for i in range(-band, band + 1):
                         diag_i_J = tn.diagonal(J, i, 2, 3)
-                        diag_i_J += tn.permute(diags_J[i + band, :-i, ...], (2, 1, 0))
-                    for i in range(-band, 0):
-                        diag_i_J = tn.diagonal(J, i, 2, 3)
-                        diag_i_J += tn.permute(diags_J[i + band, -i:, ...], (2, 1, 0))
-            J = tn.linalg.inv(J)
-            self.precond_expression = oe.contract_expression('rRmn, rnR->rmR', 
-                                                             J, (J.shape[0], J.shape[3], J.shape[1]), constants=[0])
+                        if i >= 0:
+                            diag_i_J += diags_J[i + band, ..., i:]
+                        else:
+                            diag_i_J += diags_J[i + band, ..., :i]
+            self.J_LU_factors, self.J_pivots = tn.linalg.lu_factor(J)
             
         elif prec == 'r':
-            J = tn.zeros(Phi_left_list[0].shape[-1], A_shape[1], Phi_right_list[0].shape[0], A_shape[2], Phi_right_list[0].shape[-1],
+            J = tn.zeros(Phi_left_list[0].shape[-1], shape[1], Phi_right_list[0].shape[0], shape[1], Phi_right_list[0].shape[-1],
                               dtype=Phi_left_list[0].dtype, device = Phi_left_list[0].device)
             for data, band, j in Summ_data:
                 if band < 0:
-                    J += tn.einsum('sd,smnS, LSR->dmLnR', tn.diagonal(Phi_left_list[j], 0, 0, 2), data, Phi_right_list[j])
+                    J += oe.contract('sr, smnS, LSR- > rmLnR', 
+                                     tn.diagonal(Phi_left_list[j], 0, 0, 2).contiguous(),
+                                     data, 
+                                     Phi_right_list[j])
                 else:
-                    diags_J = tn.einsum('sd,ksSn, LSR->kdLRn', tn.diagonal(Phi_left_list[j], 0, 0, 2), data, Phi_right_list[j])
-                    for i in range(-band, band+1):
+                    diags_J = oe.contract('sr, ksSn, LSR -> krLRn',
+                                          tn.diagonal(Phi_left_list[j], 0, 0, 2).contiguous(),
+                                          data, 
+                                          Phi_right_list[j])
+                    for i in range(-band, band + 1):
                         diag_i_J = tn.diagonal(J, i, 1, 3)
-                        if i > 0:
-                            diag_i_J += diags_J[i + band, ..., :-i]
+                        if i >= 0:
+                            diag_i_J += diags_J[i + band, ..., i:]
                         else:
-                            diag_i_J += diags_J[i + band, ..., -i:]
+                            diag_i_J += diags_J[i + band, ..., :i]
             sh = J.shape
             J = tn.reshape(J, [-1, J.shape[1] * J.shape[2], J.shape[3] * J.shape[4]])
-            J = tn.reshape(tn.linalg.inv(J), sh)
-            self.precond_expression = oe.contract_expression('rnR,rmLnR->rmL', 
-                                                            (J.shape[0], J.shape[-2], J.shape[-1]), J, constants=[1])
+            self.J_LU_factors, self.J_pivots = tn.linalg.lu_factor(J)
         else:
             pass
 
     def apply_prec(self, x):
-        return self.precond_expression(x)
+        if self.prec == 'c':
+            y = tn.reshape(x, self.shape + [1]) # rnR1
+            y = tn.permute(y, (0, 2, 1, 3)).contiguous() # rRn1
+            y = tn.linalg.lu_solve(self.J_LU_factors, self.J_pivots, y)
+            return tn.permute(y, (0, 2, 1, 3)).reshape(x.shape)
+        else:
+            # rnR, rmLnR -> rmL
+            y = x.reshape([self.shape[0], -1, 1]) # r(nR)1
+            y = tn.linalg.lu_solve(self.J_LU_factors, self.J_pivots, y)
+            return y.reshape(x.shape)
+        #return self.precond_expression(x)
 
     def matvec(self, x, apply_prec=True):
         y = x.reshape(self.shape)
         w = 0
         if (self.prec is not None) and apply_prec:
-            if self.prec == 'c' or self.prec == 'r':
-                y = self.apply_prec(y)
-            else:
-                raise Exception('Preconditioner '+str(self.prec)+' not defined.')
+            y = self.apply_prec(y)
         for _, band, j in self.summ_data:
             if band >= 0:
                 # data is diagonals of core
                 tmp = self.expressions[j](y)
                 w += tmp[band, ...]
-                for i in range(1, band+1):
-                    w[:, :-i, :] += tmp[i + band, :, i:, :]
-                    w[:, i:, :] += tmp[-i + band, :, :-i, :]
+                for i in range(1, band + 1):
+                     w[:, :-i, :] += tmp[i + band, :, i:, :]
+                     w[:, i:, :] += tmp[-i + band, :, :-i, :]
             else:
                 # data is a full core
                 w += self.expressions[j](y)
         return tn.reshape(w, [-1, 1])
+        
 def amen_solve(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=32768, max_full=500, kickrank=4, kick2=0, trunc_norm='res', local_solver=1, local_iterations=40, resets=2, verbose=False, preconditioner=None, use_cpp=True, use_single_precision=False, bandsMatrices=None):
     """
     Solve a multilinear system :math:`\\mathsf{Ax} = \\mathsf{b}` in the Tensor Train format.
@@ -277,18 +280,12 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
             core = Matrices[i].cores[k]
             band = bandsMatrices[i, k]
             if band < 0:
-                k_th_cores.append(core)
+                k_th_cores.append(core.clone())
             else:
                 k_th_cores.append(tn.stack([tnf.pad(tn.diagonal(core, i, 1, 2), (0, -i)) for i in range(-band, 0)] + 
-                                           [tnf.pad(tn.diagonal(core, i, 1, 2), (i, 0)) for i in range(0, band+1)]))
-        Summ_data.append(list(zip(k_th_cores, bandsMatrices[:, k], list(range(len(Matrices))))))
-
-        
-    A_ranks = np.array(Matrices[0].R)
-    for i in range(1, len(Matrices)):
-        A_ranks[1:-1] += np.array(Matrices[i].R)[1:-1]
-    A_ranks = list(A_ranks)
-    A_sizes = (Matrices[0].N).copy()                 
+                                           [tnf.pad(tn.diagonal(core, i, 1, 2), (i, 0)) for i in range(0, band + 1)]))
+        Summ_data.append(list(zip(k_th_cores, bandsMatrices[:, k], list(range(len(Matrices))))))      
+    
     
     if verbose:
         time_total = datetime.datetime.now()
@@ -302,38 +299,37 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
         x = torchtt.ones(b.N, dtype=dtype, device=device)
     else:
         x = x0
-
-    # kkt = torchttcpp.amen_solve(A.cores, b.cores, x.cores, b.N, A.R, b.R, x.R, nswp, eps, rmax, max_full, kickrank, kick2, local_iterations, resets, verbose, 0)
+        
     x_cores = x.cores.copy()
     rx = x.R.copy()
+    
     # check if rmax is a list
     if isinstance(rmax, int):
-        rmax = [1] + (d-1) * [rmax] + [1]
+        rmax = [1] + (d - 1) * [rmax] + [1]
 
     # z cores
-    rz = [1]+(d-1)*[kickrank+kick2]+[1]
-    z_tt = torchtt.random(N, rz, dtype, device=device)
-    z_cores = z_tt.cores
+    rz = [1] + [kickrank + kick2] * (d - 1) + [1]
+    z_cores = torchtt.random(N, rz, dtype, device=device).cores
     z_cores, rz = rl_orthogonal(z_cores, rz, False)
 
     norms = np.zeros(d)
     Phiz = [[tn.ones((1, 1, 1), dtype=dtype, device=device) for i in range(len(Matrices))]] +  \
            [[None] * len(Matrices)] * (d - 1) + \
            [[tn.ones((1, 1, 1), dtype=dtype, device=device) for i in range(len(Matrices))]]  # size is rzk x Rk x rxk
-    Phiz_b = [tn.ones((1, 1), dtype=dtype, device=device)] +  [None] * (d-1) + \
+    Phiz_b = [tn.ones((1, 1), dtype=dtype, device=device)] +  [None] * (d - 1) + \
              [tn.ones((1, 1), dtype=dtype, device=device)]   # size is rzk x rzbk
 
     Phis = [[tn.ones((1, 1, 1), dtype=dtype, device=device) for i in range(len(Matrices))]] + \
            [[None] * len(Matrices)] * (d - 1) + \
            [[tn.ones((1, 1, 1), dtype=dtype, device=device) for i in range(len(Matrices))]]  # size is rk x Rk x rk
-    Phis_b = [tn.ones((1, 1), dtype=dtype, device=device)] + [None] * (d-1) + \
+    Phis_b = [tn.ones((1, 1), dtype=dtype, device=device)] + [None] * (d - 1) + \
              [tn.ones((1, 1), dtype=dtype, device=device)]  # size is rk x rbk
 
     last = False
 
-    normA = np.ones((d-1))
-    normb = np.ones((d-1))
-    normx = np.ones((d-1))
+    normA = np.ones(d - 1)
+    normb = np.ones(d - 1)
+    normx = np.ones(d - 1)
     nrmsc = 1.0
 
     if verbose:
@@ -350,22 +346,21 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
                   (swp+1, "(last one) " if last else ""))
             tme_sweep = datetime.datetime.now()
 
-        tme = datetime.datetime.now()
-        for k in range(d-1, 0, -1):
-
+        #orthogonalization 
+        for k in range(d - 1, 0, -1):
             # update the z part (ALS) update
             if not last:
                 if swp > 0:
                     # shape rzp x N x rz
-                    czA = _local_product(Phiz[k+1], Phiz[k], Summ_data[k], x_cores[k])
+                    czA = _local_product(Phiz[k + 1], Phiz[k], Summ_data[k], x_cores[k])
                     # shape is rzp x N x rz
-                    czy = tn.einsum('br,bnB,BR->rnR',
-                                    Phiz_b[k], b.cores[k], Phiz_b[k+1])
+                    czy = oe.contract('br, bnB, BR -> rnR',
+                                    Phiz_b[k], b.cores[k], Phiz_b[k + 1])
                     cz_new = czy*nrmsc - czA
                     _, _, vz = SVD(tn.reshape(cz_new, [cz_new.shape[0], -1]))
                     # truncate to kickrank
                     cz_new = vz[:min(kickrank, vz.shape[0]), :].t()
-                    if k < d-1:  # extend cz_new with random elements
+                    if k < d - 1:  # extend cz_new with random elements
                         cz_new = tn.cat(
                             (cz_new, tn.randn((cz_new.shape[0], kick2),  dtype=dtype, device=device)), 1)
                 else:
@@ -373,52 +368,52 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
 
                 qz, _ = QR(cz_new)
                 rz[k] = qz.shape[1]
-                z_cores[k] = tn.reshape(qz.t(), [rz[k], N[k], rz[k+1]])
+                z_cores[k] = tn.reshape(qz.t(), [rz[k], N[k], rz[k + 1]])
 
             # norm correction ?
             if swp > 0:
-                nrmsc = nrmsc * normA[k-1] * normx[k-1] / normb[k-1]
+                nrmsc = nrmsc * normA[k - 1] * normx[k - 1] / normb[k - 1]
 
-            core = tn.reshape(x_cores[k], [rx[k], N[k]*rx[k+1]]).t()
+            core = tn.reshape(x_cores[k], [rx[k], N[k] * rx[k + 1]]).t()
             Qmat, Rmat = QR(core)
 
-            core_prev = tn.einsum('ijk,km->ijm', x_cores[k-1], Rmat.T)
+            core_prev = oe.contract('ijk, mk -> ijm', x_cores[k - 1], Rmat)
             rx[k] = Qmat.shape[1]
+            
 
             current_norm = tn.linalg.norm(core_prev)
             if current_norm > 0:
                 core_prev = core_prev / current_norm
             else:
                 current_norm = 1.0
-            normx[k-1] = normx[k-1]*current_norm
+            normx[k - 1] = normx[k - 1] * current_norm
 
-            x_cores[k] = tn.reshape(Qmat.t(), [rx[k], N[k], rx[k+1]])
-            x_cores[k-1] = core_prev[:]
+            x_cores[k] = tn.reshape(Qmat.t(), [rx[k], N[k], rx[k + 1]])
+            x_cores[k - 1] = core_prev[:]
 
             # update phis (einsum)
-            Phis[k] = _compute_phi_A('bck', Phis[k+1], x_cores[k], Summ_data[k], x_cores[k])
-            Phis_b[k] = _compute_phi_bck_rhs(Phis_b[k+1], b.cores[k], x_cores[k])
+            Phis[k] = _compute_phi_A('bck', Phis[k + 1], x_cores[k], Summ_data[k], x_cores[k])
+            Phis_b[k] = _compute_phi_bck_rhs(Phis_b[k + 1], b.cores[k], x_cores[k])
 
             # ... and norms
             norm = sum([tn.linalg.norm(Phis[k][i]) ** 2 for i in range(len(Matrices))])
             norm = tn.sqrt(norm)
             norm = norm if norm > 0 else 1.0
-            normA[k-1] = norm
+            normA[k - 1] = norm
             Phis[k] = [Phis[k][i] / norm for i in range(len(Matrices))]
             norm = tn.linalg.norm(Phis_b[k])
             norm = norm if norm > 0 else 1.0
-            normb[k-1] = norm
+            normb[k - 1] = norm
             Phis_b[k] = Phis_b[k] / norm
 
             # norm correction
-            nrmsc = nrmsc * normb[k-1] / (normA[k-1] * normx[k-1])
+            nrmsc = nrmsc * normb[k - 1] / (normA[k - 1] * normx[k - 1])
 
             # compute phis_z
             if not last:
-                Phiz[k] = _compute_phi_A('bck', Phiz[k+1], z_cores[k], Summ_data[k], x_cores[k])
-                Phiz[k] = [Phiz[k][i] / normA[k-1] for i in range(len(Matrices))]
-                Phiz_b[k] = _compute_phi_bck_rhs(
-                    Phiz_b[k+1], b.cores[k], z_cores[k]) / normb[k-1]
+                Phiz[k] = _compute_phi_A('bck', Phiz[k + 1], z_cores[k], Summ_data[k], x_cores[k])
+                Phiz[k] = [Phiz[k][i] / normA[k - 1] for i in range(len(Matrices))]
+                Phiz_b[k] = _compute_phi_bck_rhs(Phiz_b[k + 1], b.cores[k], z_cores[k]) / normb[k - 1]
 
         # start loop
         max_res = 0
@@ -430,54 +425,53 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
             previous_solution = tn.reshape(x_cores[k], [-1, 1])
 
             # assemble rhs
-            rhs = tn.einsum('br,bmB,BR->rmR',
-                            Phis_b[k], b.cores[k] * nrmsc, Phis_b[k+1])
+            rhs = oe.contract('br, bmB, BR -> rmR',
+                              Phis_b[k], b.cores[k] * nrmsc, Phis_b[k + 1])
             rhs = tn.reshape(rhs, [-1, 1])
             norm_rhs = tn.linalg.norm(rhs)
 
             # residuals
-            real_tol = (eps/np.sqrt(d))/damp
+            real_tol = (eps / np.sqrt(d)) / damp
 
             # solve the local system
-            use_full = rx[k]*N[k]*rx[k+1] < max_full
+            use_full = rx[k] * N[k] * rx[k + 1] < max_full
             if use_full:
                 # solve the full system
                 if verbose:
                     print('\t\tChoosing direct solver (local size %d)....' %
-                          (rx[k]*N[k]*rx[k+1]))
+                          (rx[k] * N[k] * rx[k + 1]))
                 # shape is Rp x N x N x r x r
-                B = tn.zeros(rx[k], N[k], rx[k+1], rx[k], N[k], rx[k+1], dtype=dtype, device=device)
+                B = tn.zeros(rx[k], N[k], rx[k + 1], rx[k], N[k], rx[k + 1], dtype=dtype, device=device)
                 for data, band, j in Summ_data[k]:
                     if band < 0:
-                        Bp = tn.einsum('smnS,LSR->smnRL', data, Phis[k+1][j])
-                        B += tn.einsum('lsr,smnRL->lmLrnR', Phis[k][j], Bp)
+                        Bp = oe.contract('smnS, LSR -> smnRL', data, Phis[k + 1][j])
+                        B += oe.contract('lsr,smnRL->lmLrnR', Phis[k][j], Bp)
                     else:
-                        diags_Bp = tn.einsum('ksSn,LSR->ksRLn', data, Phis[k+1][j])
-                        diags_B = tn.einsum('lsr,ksRLn->klLrRn', Phis[k][j], diags_Bp)
-                        for i in range(-band, band+1):
+                        diags_Bp = oe.contract('ksSn, LSR -> ksRLn', data, Phis[k + 1][j])
+                        diags_B = oe.contract('lsr, ksRLn -> klLrRn', Phis[k][j], diags_Bp)
+                        for i in range(-band, band + 1):
                             diag_i_B = tn.diagonal(B, i, 1, 4)
                             if i >= 0:
                                 diag_i_B += diags_B[i + band, ..., i:]
                             else:
                                 diag_i_B += diags_B[i + band, ..., :i]
-                B = tn.reshape(B, [rx[k]*N[k]*rx[k+1], rx[k]*N[k]*rx[k+1]])
+                B = tn.reshape(B, [rx[k] * N[k] * rx[k + 1], rx[k] * N[k] * rx[k + 1]])
 
                 solution_now = tn.linalg.solve(B, rhs)
 
-                res_old = tn.linalg.norm(B@previous_solution-rhs)/norm_rhs
-                res_new = tn.linalg.norm(B@solution_now-rhs)/norm_rhs
+                res_old = tn.linalg.norm(B @ previous_solution - rhs) / norm_rhs
+                res_new = tn.linalg.norm(B @ solution_now - rhs) / norm_rhs
             else:
                 # iterative solver
                 if verbose:
                     print('\t\tChoosing iterative solver %s (local size %d)....' % (
-                        'GMRES' if local_solver == 1 else 'BiCGSTAB_reset', rx[k]*N[k]*rx[k+1]))
+                        'GMRES' if local_solver == 1 else 'BiCGSTAB_reset', rx[k] * N[k] * rx[k + 1]))
                     time_local = datetime.datetime.now()
-                shape_now = [rx[k], N[k], rx[k+1]]
+                shape_now = [rx[k], N[k], rx[k + 1]]
 
                 if use_single_precision:
-                    Op = _LinearOp(Phis[k], Phis[k+1],
-                                   Summ_data[k], (A_ranks[k], A_sizes[k], A_sizes[k], A_ranks[k+1]),
-                                   shape_now, preconditioner)
+                    Op = _LinearOp(Phis[k], Phis[k + 1],
+                                   Summ_data[k], shape_now, preconditioner)
 
                     # solution_now, flag, nit, res_new = BiCGSTAB_reset(Op, rhs,previous_solution[:], eps_local, local_iterations)
                     eps_local = real_tol * norm_rhs
@@ -494,28 +488,25 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
                         raise InvalidArguments('Solver not implemented.')
 
                     if preconditioner != None:
-                        solution_now = Op.apply_prec(
-                            tn.reshape(solution_now, shape_now))
-                        solution_now = tn.reshape(solution_now, [-1, 1])
+                        solution_now = Op.apply_prec(solution_now)
 
                     solution_now = previous_solution + solution_now.to(dtype)
                     res_old = tn.linalg.norm(Op.matvec(previous_solution.to(
-                        tn.float32), False).to(dtype)-rhs)/norm_rhs
+                        tn.float32), False).to(dtype) - rhs) / norm_rhs
                     res_new = tn.linalg.norm(Op.matvec(solution_now.to(
-                        tn.float32), False).to(dtype)-rhs)/norm_rhs
+                        tn.float32), False).to(dtype) - rhs) / norm_rhs
                 else:
-                    Op = _LinearOp(Phis[k], Phis[k+1],
-                                   Summ_data[k], (A_ranks[k], A_sizes[k], A_sizes[k], A_ranks[k+1]),
-                                   shape_now, preconditioner)
+                    Op = _LinearOp(Phis[k], Phis[k + 1],
+                                   Summ_data[k], shape_now, preconditioner)
 
                     # solution_now, flag, nit, res_new = BiCGSTAB_reset(Op, rhs,previous_solution[:], eps_local, local_iterations)
                     eps_local = real_tol * norm_rhs
                     drhs = Op.matvec(previous_solution, False)
-                    drhs = rhs-drhs
+                    drhs = rhs - drhs
                     eps_local = eps_local / tn.linalg.norm(drhs)
                     if local_solver == 1:
                         solution_now, flag, nit = gmres_restart(
-                            Op, drhs, previous_solution*0, rhs.shape[0], local_iterations+1, eps_local, resets)
+                            Op, drhs, previous_solution*0, rhs.shape[0], local_iterations + 1, eps_local, resets)
                     elif local_solver == 2:
                         solution_now, flag, nit, _ = BiCGSTAB_reset(
                             Op, drhs, previous_solution*0, eps_local, local_iterations)
@@ -523,21 +514,19 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
                         raise InvalidArguments('Solver not implemented.')
 
                     if preconditioner != None:
-                        solution_now = Op.apply_prec(
-                            tn.reshape(solution_now, shape_now))
-                        solution_now = tn.reshape(solution_now, [-1, 1])
+                        solution_now = Op.apply_prec(solution_now)
 
                     solution_now = previous_solution + solution_now
                     res_old = tn.linalg.norm(
-                        Op.matvec(previous_solution, False)-rhs) / norm_rhs
-                    res_new = tn.linalg.norm(
-                        Op.matvec(solution_now, False)-rhs) / norm_rhs
+                        Op.matvec(previous_solution, False) - rhs) / norm_rhs
+                    res_new = tn.linalg.norm(Op.matvec(solution_now, False) - rhs) / norm_rhs
 
                 if verbose:
                     print('\t\tFinished with flag %d after %d iterations with relres %g (from %g)' % (
                         flag, nit, res_new, real_tol * norm_rhs))
                     time_local = datetime.datetime.now() - time_local
                     print('\t\tTime needed ', time_local)
+                    
             # residual damp check
             if res_old / res_new < damp and res_new > real_tol:
                 if verbose:
@@ -554,118 +543,102 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
             max_dx = max(dx, max_dx)
             max_res = max(max_res, res_old)
 
-            solution_now = tn.reshape(solution_now, [rx[k]*N[k], rx[k+1]])
+            solution_now = tn.reshape(solution_now, [rx[k] * N[k], rx[k + 1]])
             # truncation
-            if k < d-1:
+            if k < d:
                 u, s, v = SVD(solution_now)
                 if trunc_norm == 'fro':
                     pass
                 else:
-                    # search for a rank such that offeres small enough residuum
+                    # search for a rank such that offeres small enough residual
                     # TODO: binary search?
                     r = 0
-                    for r in range(u.shape[1]-1, 0, -1):
+                    for r in range(u.shape[1] - 1, 0, -1):
                         # solution has the same size
                         solution = u[:, :r] @ tn.diag(s[:r]) @ v[:r, :]
-                        # res = tn.linalg.norm(tn.reshape(local_product(Phis[k+1],Phis[k],A.cores[k],tn.reshape(solution,[rx[k],N[k],rx[k+1]]),solution_now.shape),[-1,1]) - rhs)/norm_rhs
 
                         if use_full:
-                            res = tn.linalg.norm(
-                                B@tn.reshape(solution, [-1, 1])-rhs)/norm_rhs
+                            res = tn.linalg.norm(B @ tn.reshape(solution, [-1, 1]) - rhs)
                         else:
-                            # res = tn.linalg.norm(tn.reshape(local_product(Phis[k+1],Phis[k],A.cores[k],tn.reshape(solution,[rx[k],N[k],rx[k+1]]),solution_now.shape),[-1,1]) - rhs)/norm_rhs
                             res = tn.linalg.norm(Op.matvec(solution.to(
-                                tn.float32 if use_single_precision else dtype)).to(dtype)-rhs)/norm_rhs
-                        if res > max(real_tol*damp, res_new):
+                                tn.float32 if use_single_precision else dtype), False).to(dtype) - rhs)
+                        if res > real_tol * norm_rhs:
                             break
                     r += 1
-
-                    r = min([r, tn.numel(s), rmax[k+1]])
-            else:
-                u, v = QR(solution_now)
-                # v = v.t()
-                r = u.shape[1]
-                s = tn.ones(r,  dtype=dtype, device=device)
-
-            u = u[:, :r]
-            v = tn.diag(s[:r]) @ v[:r, :]
-            v = v.t()
+                    r = min([r, tn.numel(s), rmax[k + 1]])
+                u = u[:, :r]
+                v = tn.diag(s[:r]) @ v[:r, :]
+                
 
             if not last:
-                czA = _local_product(Phiz[k+1], Phiz[k], Summ_data[k], tn.reshape(
-                                     u@v.t(), [rx[k], N[k], rx[k+1]]))  # shape rzp x N x rz
-
+                czA = _local_product(Phiz[k + 1], Phiz[k], Summ_data[k], 
+                                     tn.reshape(u @ v, [rx[k], N[k], rx[k + 1]]))  # shape rzp x N x rz
                 # shape is rzp x N x rz
-                czy = tn.einsum('br,bnB,BR->rnR',
-                                Phiz_b[k], b.cores[k]*nrmsc, Phiz_b[k+1])
+                czy = oe.contract('br, bnB , BR -> rnR',
+                                Phiz_b[k], b.cores[k] * nrmsc, Phiz_b[k + 1])
                 cz_new = czy - czA
 
-                uz, _, _ = SVD(tn.reshape(cz_new, [rz[k]*N[k], rz[k+1]]))
+                uz, _, _ = SVD(tn.reshape(cz_new, [rz[k] * N[k], rz[k + 1]]))
                 # truncate to kickrank
                 cz_new = uz[:, :min(kickrank, uz.shape[1])]
-                if k < d-1:  # extend cz_new with random elements
+                if k < d - 1:  # extend cz_new with random elements
                     cz_new = tn.cat(
                         (cz_new, tn.randn((cz_new.shape[0], kick2),  dtype=dtype, device=device)), 1)
 
                 qz, _ = QR(cz_new)
-                rz[k+1] = qz.shape[1]
-                z_cores[k] = tn.reshape(qz, [rz[k], N[k], rz[k+1]])
+                rz[k + 1] = qz.shape[1]
+                z_cores[k] = tn.reshape(qz, [rz[k], N[k], rz[k + 1]])
 
-            if k < d-1:
+            if k < d - 1:
                 if not last:
-                    left_res = _local_product(Phiz[k+1], Phis[k], Summ_data[k], tn.reshape(
-                                              u@v.t(), [rx[k], N[k], rx[k+1]]))
-                    left_b = tn.einsum('br,bmB,BR->rmR', Phis_b[k], b.cores[k]*nrmsc, Phiz_b[k+1])
+                    left_res = _local_product(Phiz[k + 1], Phis[k], Summ_data[k],
+                                              tn.reshape(u @ v, [rx[k], N[k], rx[k + 1]]))
+                    left_b = oe.contract('br, bmB, BR -> rmR', Phis_b[k],  nrmsc * b.cores[k], Phiz_b[k + 1])
                     uk = left_b - left_res  # rx_k x N_k x rz_k+1
                     u, Rmat = QR(tn.cat((u, tn.reshape(uk, [u.shape[0], -1])), 1))
                     r_add = uk.shape[2]
-                    v = tn.cat(
-                        (v, tn.zeros([rx[k+1], r_add],  dtype=dtype, device=device)), 1)
-                    v = v @ Rmat.t()
+                    v = Rmat[:, :v.shape[0]] @ v
 
                 r = u.shape[1]
-                v = tn.einsum('ji,jkl->ikl', v, x_cores[k+1])
+                v = oe.contract('ij, jkl -> ikl', v, x_cores[k + 1])
                 # remove norm correction
                 nrmsc = nrmsc * normA[k] * normx[k] / normb[k]
 
-                norm_now = tn.linalg.norm(v)
-
-                if norm_now > 0:
-                    v = v / norm_now
-                else:
-                    norm_now = 1.0
-                normx[k] = normx[k] * norm_now
+                norm_now = tn.linalg.norm(s[:r]) # v and x_cores[k+1] are orthogonal
+                norm_now = norm_now if norm_now > 0 else 1.0
+                v = v / norm_now
+                normx[k] *= norm_now
 
                 x_cores[k] = tn.reshape(u, [rx[k], N[k], r])
-                x_cores[k+1] = tn.reshape(v, [r, N[k+1], rx[k+2]])
-                rx[k+1] = r
+                x_cores[k + 1] = tn.reshape(v, [r, N[k + 1], rx[k + 2]])
+                rx[k + 1] = r
 
                 # next phis with norm correction
-                Phis[k+1] = _compute_phi_A('fwd', Phis[k], x_cores[k], Summ_data[k], x_cores[k])
-                Phis_b[k+1] = _compute_phi_fwd_rhs(Phis_b[k], b.cores[k], x_cores[k])
+                Phis[k + 1] = _compute_phi_A('fwd', Phis[k], x_cores[k], Summ_data[k], x_cores[k])
+                
+                Phis_b[k + 1] = _compute_phi_fwd_rhs(Phis_b[k], b.cores[k], x_cores[k])
 
                 # ... and norms
-                norm = sum([tn.linalg.norm(Phis[k+1][i]) ** 2 for i in range(len(Matrices))])
+                norm = sum([tn.linalg.norm(Phis[k + 1][i]) ** 2 for i in range(len(Matrices))])
                 norm = tn.sqrt(norm)
                 norm = norm if norm > 0 else 1.0
                 normA[k] = norm
-                Phis[k+1] = [Phis[k+1][i] / norm for i in range(len(Matrices))]
-                norm = tn.linalg.norm(Phis_b[k+1])
+                Phis[k + 1] = [Phis[k + 1][i] / norm for i in range(len(Matrices))]
+                norm = tn.linalg.norm(Phis_b[k + 1])
                 norm = norm if norm > 0 else 1.0
                 normb[k] = norm
-                Phis_b[k+1] = Phis_b[k+1] / norm
+                Phis_b[k + 1] = Phis_b[k + 1] / norm
 
                 # norm correction
                 nrmsc = nrmsc * normb[k] / (normA[k] * normx[k])
 
                 # next phiz
                 if not last:
-                    Phiz[k+1] = _compute_phi_A('fwd', Phiz[k], z_cores[k], Summ_data[k], x_cores[k])
-                    Phiz[k+1] = [Phiz[k+1][i] / normA[k] for i in range(len(Phiz[k+1]))]
-                    Phiz_b[k+1] = _compute_phi_fwd_rhs(Phiz_b[k], b.cores[k], z_cores[k]) / normb[k]
+                    Phiz[k + 1] = _compute_phi_A('fwd', Phiz[k], z_cores[k], Summ_data[k], x_cores[k])
+                    Phiz[k + 1] = [Phiz[k + 1][i] / normA[k] for i in range(len(Phiz[k + 1]))]
+                    Phiz_b[k + 1] = _compute_phi_fwd_rhs(Phiz_b[k], b.cores[k], z_cores[k]) / normb[k]
             else:
-                x_cores[k] = tn.reshape(
-                    u@tn.diag(s[:r]) @ v[:r, :].t(), [rx[k], N[k], rx[k+1]])
+                x_cores[k] = tn.reshape(u @ v, [rx[k], N[k], rx[k + 1]])
 
         if verbose:
             print('Solution rank is', rx)
@@ -676,8 +649,7 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
         if last:
             break
 
-        if max_res < eps:
-            last = True
+        last = max_res < eps
 
     if verbose:
         time_total = datetime.datetime.now() - time_total
@@ -714,34 +686,36 @@ def _compute_phi_A(order, Phi_now_list, core_left, Summ_data, core_right):
         if band < 0:
             # data is a full core
             if order == 'bck':
-                tmp = tn.tensordot(Phi_now_list[j], core_right, ([2], [2])) # LSR, rNR -> LSrN
-                tmp = tn.tensordot(data, tmp, ([2, 3], [3, 1])) # sMNS LSrN -> sMLr
-                tmp = tn.tensordot(core_left, tmp, ([2, 1], [2, 1])) #lML, sMLr -> lsr
+                Phi_list.append(oe.contract('LSR, lmL, smnS, rnR -> lsr',
+                                            Phi_now_list[j], core_left, data, core_right))
             elif order == 'fwd':
-                tmp = tn.tensordot(Phi_now_list[j], core_right, ([2], [0])) #lsr rNR -> lsNR
-                tmp = tn.tensordot(data, tmp, ([2, 0], [2, 1])) # sMNS lsNR -> MSlR
-                tmp = tn.tensordot(core_left, tmp, ([0, 1], [2, 0])) # lML, MSlR -> LSR 
-            Phi_list.append(tmp)
+                Phi_list.append(oe.contract('lsr, lmL, smnS, rnR -> LSR',
+                                            Phi_now_list[j], core_left, data, core_right))
         else:            
             # data is diagonals of a core
+            # cores_left = tn.stack([tnf.pad(core_left[:, -i:, :], (0, 0, 0, -i)) for i in range(-band, 1)] + 
+            #                     [tnf.pad(core_left[:, :-i, :], (0, 0, i, 0)) for i in range(1, band + 1)])
             if order == 'bck':
-                cores_left = tn.stack([tnf.pad(core_left[:, -i:, :], (0, 0, 0, -i)) for i in range(-band, 1)] + 
-                                      [tnf.pad(core_left[:, :-i, :], (0, 0, i, 0)) for i in range(1, band+1)])
-                Phi_list.append(tn.einsum('LSR,klNL,ksSN,rNR->lsr', Phi_now_list[j],
-                                                     cores_left, data, core_right))
+                tmp = 0
+                tmp += oe.contract('LSR, lnL, sSn, rnR -> lsr',
+                                            Phi_now_list[j], core_left, data[band, ...], core_right)
+                for i in range(1, band + 1):
+                    tmp += oe.contract('LSR, lnL, sSn, rnR -> lsr',
+                                            Phi_now_list[j], core_left[:, :-i, :], data[i + band, ..., i:], core_right[:, i:, :])
+                    tmp += oe.contract('LSR, lnL, sSn, rnR -> lsr',
+                                            Phi_now_list[j], core_left[:, i:, :], data[-i + band, ..., :-i], core_right[:, :-i, :])
+                # Phi_list.append(oe.contract('LSR, klnL, ksSn, rnR -> lsr',
+                #                             Phi_now_list[j], cores_left, data, core_right))
             elif order == 'fwd':
-                tmp = tn.einsum('lsr,lNL,sSN,rNR->LSR', Phi_now_list[j],
-                                                      core_left, data[band, ...], core_right)
-                for i in range(1, band+1):
-                    tmp += tn.einsum('lsr,lNL,sSN,rNR->LSR', Phi_now_list[j],
-                                                      core_left[:, :-i, :], data[i + band, ..., i:], core_right[:, i:, :])
-                    tmp += tn.einsum('lsr,lNL,sSN,rNR->LSR', Phi_now_list[j],
-                                                      core_left[:, i:, :], data[-i + band, ..., :-i], core_right[:, :-i, :])
-                Phi_list.append(tmp)
-                # cores_left = tn.stack([tnf.pad(core_left[:, -i:, :], (0, 0, 0, -i)) for i in range(-band, 1)] + 
-                #                   [tnf.pad(core_left[:, :-i, :], (0, 0, i, 0)) for i in range(1, band+1)])
-                #Phi_list.append(tn.einsum('lsr,klNL,ksSN,rNR->LSR', Phi_now_list[j],
-                #                                       cores_left, data, core_right))
+                tmp = 0
+                tmp += oe.contract('lsr, lnL, sSn, rnR -> LSR',
+                                            Phi_now_list[j], core_left, data[band, ...], core_right)
+                for i in range(1, band + 1):
+                    tmp += oe.contract('lsr, lnL, sSn, rnR -> LSR',
+                                            Phi_now_list[j], core_left[:, :-i, :], data[i + band, ..., i:], core_right[:, i:, :])
+                    tmp += oe.contract('lsr, lnL, sSn, rnR -> LSR',
+                                            Phi_now_list[j], core_left[:, i:, :], data[-i + band, ..., :-i], core_right[:, :-i, :])
+            Phi_list.append(tmp)
     return Phi_list
 
 
