@@ -240,7 +240,7 @@ def amen_solve(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=32768, max_full=50
             A += Matrices[i]
         if x0 == None:
             x_cores = []
-            x_R = [1]*(1+len(A.N))
+            x_R = [1] * (1 + len(A.N))
         else:
             x_cores = x0.cores
             x_R = x0.R
