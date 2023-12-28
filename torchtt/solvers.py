@@ -12,6 +12,7 @@ from torchtt._iterative_solvers import BiCGSTAB_reset, gmres_restart, gmres
 import opt_einsum as oe
 from .errors import *
 import torch.nn.functional as tnf
+import scipy
 
 
 try:
@@ -78,13 +79,14 @@ class _LinearOp():
         for data, band, j in Summ_data:
             sizes = 'lsr, smnS, LSR, rnR-> lmL' if band < 0 else 'lsr, ksSn, LSR, rnR -> klnL'
             expr = oe.contract_expression(sizes,
-                                          Phi_left_list[j], data, Phi_right_list[j], 
+                                          Phi_left_list[j].contiguous(), data.contiguous(), Phi_right_list[j].contiguous(), 
                                           shape,
-                                          constants=[0, 1, 2])
+                                          constants=[0, 1, 2], optimize='optimal')
             self.expressions.append(expr)
         if prec == 'c':
             J = tn.zeros(Phi_left_list[0].shape[-1], Phi_right_list[0].shape[-1], shape[1], shape[1],
                               dtype=Phi_left_list[0].dtype, device=Phi_left_list[0].device)
+            self.band_J = 0
             for data, band, j in Summ_data:
                 if band < 0:
                     J += oe.contract('sr, smnS, SR -> rRmn',
@@ -107,6 +109,7 @@ class _LinearOp():
         elif prec == 'r':
             J = tn.zeros(Phi_left_list[0].shape[-1], shape[1], Phi_right_list[0].shape[0], shape[1], Phi_right_list[0].shape[-1],
                               dtype=Phi_left_list[0].dtype, device = Phi_left_list[0].device)
+            self.J_band = 0
             for data, band, j in Summ_data:
                 if band < 0:
                     J += oe.contract('sr, smnS, LSR- > rmLnR', 
@@ -134,20 +137,21 @@ class _LinearOp():
         if self.prec == 'c':
             y = tn.reshape(x, self.shape + [1]) # rnR1
             y = tn.permute(y, (0, 2, 1, 3)).contiguous() # rRn1
-            y = tn.linalg.lu_solve(self.J_LU_factors, self.J_pivots, y)
-            return tn.permute(y, (0, 2, 1, 3)).reshape(x.shape)
+            z = tn.linalg.lu_solve(self.J_LU_factors, self.J_pivots, y)
+            return tn.permute(z, (0, 2, 1, 3)).reshape(x.shape).contiguous()
         else:
             # rnR, rmLnR -> rmL
             y = x.reshape([self.shape[0], -1, 1]) # r(nR)1
             y = tn.linalg.lu_solve(self.J_LU_factors, self.J_pivots, y)
-            return y.reshape(x.shape)
-        #return self.precond_expression(x)
+            return y.reshape(x.shape).contiguous()
 
     def matvec(self, x, apply_prec=True):
+        full_time = datetime.datetime.now()
         y = x.reshape(self.shape)
         w = 0
         if (self.prec is not None) and apply_prec:
             y = self.apply_prec(y)
+        y = y.contiguous()
         for _, band, j in self.summ_data:
             if band >= 0:
                 # data is diagonals of core
@@ -282,8 +286,8 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
             if band < 0:
                 k_th_cores.append(core.clone())
             else:
-                k_th_cores.append(tn.stack([tnf.pad(tn.diagonal(core, i, 1, 2), (0, -i)) for i in range(-band, 0)] + 
-                                           [tnf.pad(tn.diagonal(core, i, 1, 2), (i, 0)) for i in range(0, band + 1)]))
+                k_th_cores.append(tn.stack([tnf.pad(tn.diagonal(core, i, 1, 2), (0, -i)).contiguous() for i in range(-band, 0)] + 
+                                           [tnf.pad(tn.diagonal(core, i, 1, 2), (i, 0)).contiguous() for i in range(0, band + 1)]))
         Summ_data.append(list(zip(k_th_cores, bandsMatrices[:, k], list(range(len(Matrices))))))      
     
     
@@ -364,17 +368,17 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
                         cz_new = tn.cat(
                             (cz_new, tn.randn((cz_new.shape[0], kick2),  dtype=dtype, device=device)), 1)
                 else:
-                    cz_new = tn.reshape(z_cores[k], [rz[k], -1]).t()
+                    cz_new = tn.reshape(z_cores[k], [rz[k], -1]).t().contiguous()
 
                 qz, _ = QR(cz_new)
                 rz[k] = qz.shape[1]
-                z_cores[k] = tn.reshape(qz.t(), [rz[k], N[k], rz[k + 1]])
+                z_cores[k] = tn.reshape(qz.t(), [rz[k], N[k], rz[k + 1]]).contiguous()
 
             # norm correction ?
             if swp > 0:
                 nrmsc = nrmsc * normA[k - 1] * normx[k - 1] / normb[k - 1]
 
-            core = tn.reshape(x_cores[k], [rx[k], N[k] * rx[k + 1]]).t()
+            core = tn.reshape(x_cores[k], [rx[k], N[k] * rx[k + 1]]).t().contiguous()
             Qmat, Rmat = QR(core)
 
             core_prev = oe.contract('ijk, mk -> ijm', x_cores[k - 1], Rmat)
@@ -388,7 +392,7 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
                 current_norm = 1.0
             normx[k - 1] = normx[k - 1] * current_norm
 
-            x_cores[k] = tn.reshape(Qmat.t(), [rx[k], N[k], rx[k + 1]])
+            x_cores[k] = tn.reshape(Qmat.t(), [rx[k], N[k], rx[k + 1]]).contiguous()
             x_cores[k - 1] = core_prev[:]
 
             # update phis (einsum)
@@ -587,7 +591,7 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
 
                 qz, _ = QR(cz_new)
                 rz[k + 1] = qz.shape[1]
-                z_cores[k] = tn.reshape(qz, [rz[k], N[k], rz[k + 1]])
+                z_cores[k] = tn.reshape(qz, [rz[k], N[k], rz[k + 1]]).contiguous()
 
             if k < d - 1:
                 if not last:
@@ -609,8 +613,8 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
                 v = v / norm_now
                 normx[k] *= norm_now
 
-                x_cores[k] = tn.reshape(u, [rx[k], N[k], r])
-                x_cores[k + 1] = tn.reshape(v, [r, N[k + 1], rx[k + 2]])
+                x_cores[k] = tn.reshape(u, [rx[k], N[k], r]).contiguous()
+                x_cores[k + 1] = tn.reshape(v, [r, N[k + 1], rx[k + 2]]).contiguous()
                 rx[k + 1] = r
 
                 # next phis with norm correction
@@ -638,7 +642,7 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
                     Phiz[k + 1] = [Phiz[k + 1][i] / normA[k] for i in range(len(Phiz[k + 1]))]
                     Phiz_b[k + 1] = _compute_phi_fwd_rhs(Phiz_b[k], b.cores[k], z_cores[k]) / normb[k]
             else:
-                x_cores[k] = tn.reshape(u @ v, [rx[k], N[k], rx[k + 1]])
+                x_cores[k] = tn.reshape(u @ v, [rx[k], N[k], rx[k + 1]]).contiguous()
 
         if verbose:
             print('Solution rank is', rx)
@@ -647,6 +651,7 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
             print('Time ', tme_sweep)
 
         if last:
+            #print("swp number = ", swp)
             break
 
         last = max_res < eps
@@ -682,6 +687,16 @@ def _compute_phi_A(order, Phi_now_list, core_left, Summ_data, core_right):
                                                      If order == 'fwd' has shape r1_k+1 x R_k+1 x r2_k+1
     """
     Phi_list = []
+    if order == 'fwd':
+        core_right_tmp = tn.transpose(core_right, 0, 2).contiguous()
+        core_left_tmp = tn.transpose(core_left, 0, 2).contiguous()
+    band_max = -1
+    for _, band, _ in Summ_data:
+        if band_max < band:
+            band_max = band
+    if band_max >= 0:
+        cores_left = tn.stack([tnf.pad(core_left[:, -i:, :], (0, 0, 0, -i)) for i in range(-band_max, 1)] + 
+                                [tnf.pad(core_left[:, :-i, :], (0, 0, i, 0)) for i in range(1, band_max + 1)])
     for data, band, j in Summ_data:
         if band < 0:
             # data is a full core
@@ -689,33 +704,16 @@ def _compute_phi_A(order, Phi_now_list, core_left, Summ_data, core_right):
                 Phi_list.append(oe.contract('LSR, lmL, smnS, rnR -> lsr',
                                             Phi_now_list[j], core_left, data, core_right))
             elif order == 'fwd':
-                Phi_list.append(oe.contract('lsr, lmL, smnS, rnR -> LSR',
-                                            Phi_now_list[j], core_left, data, core_right))
+                Phi_list.append(oe.contract('lsr, Lml, smnS, Rnr -> LSR',
+                                            Phi_now_list[j], core_left_tmp, data, core_right_tmp))
         else:            
             # data is diagonals of a core
-            # cores_left = tn.stack([tnf.pad(core_left[:, -i:, :], (0, 0, 0, -i)) for i in range(-band, 1)] + 
-            #                     [tnf.pad(core_left[:, :-i, :], (0, 0, i, 0)) for i in range(1, band + 1)])
             if order == 'bck':
-                tmp = 0
-                tmp += oe.contract('LSR, lnL, sSn, rnR -> lsr',
-                                            Phi_now_list[j], core_left, data[band, ...], core_right)
-                for i in range(1, band + 1):
-                    tmp += oe.contract('LSR, lnL, sSn, rnR -> lsr',
-                                            Phi_now_list[j], core_left[:, :-i, :], data[i + band, ..., i:], core_right[:, i:, :])
-                    tmp += oe.contract('LSR, lnL, sSn, rnR -> lsr',
-                                            Phi_now_list[j], core_left[:, i:, :], data[-i + band, ..., :-i], core_right[:, :-i, :])
-                # Phi_list.append(oe.contract('LSR, klnL, ksSn, rnR -> lsr',
-                #                             Phi_now_list[j], cores_left, data, core_right))
+                Phi_list.append(oe.contract('LSR, klnL, ksSn, rnR -> lsr',
+                                            Phi_now_list[j], cores_left[band_max-band:band_max+band+1, ...], data, core_right))
             elif order == 'fwd':
-                tmp = 0
-                tmp += oe.contract('lsr, lnL, sSn, rnR -> LSR',
-                                            Phi_now_list[j], core_left, data[band, ...], core_right)
-                for i in range(1, band + 1):
-                    tmp += oe.contract('lsr, lnL, sSn, rnR -> LSR',
-                                            Phi_now_list[j], core_left[:, :-i, :], data[i + band, ..., i:], core_right[:, i:, :])
-                    tmp += oe.contract('lsr, lnL, sSn, rnR -> LSR',
-                                            Phi_now_list[j], core_left[:, i:, :], data[-i + band, ..., :-i], core_right[:, :-i, :])
-            Phi_list.append(tmp)
+                Phi_list.append(oe.contract('lsr, klnL, ksSn, rnR -> LSR',
+                                            Phi_now_list[j], cores_left[band_max-band:band_max+band+1, ...], data, core_right))
     return Phi_list
 
 
