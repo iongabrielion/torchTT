@@ -780,7 +780,7 @@ namespace AMEn
                         //    7           TDOT      amkRB,rmnR->akBrn                       bknB,akBrn->rab
                         //    6           TDOT        akBrn,bknB->rab                              rab->rab
                         auto tmp1 = at::tensordot(coreA, phi_now, {3}, {1});   // amkA,RAB->amkRB 
-                        auto tmp2 = at::tensordot(tmp2, core, {1, 4}, {1, 3}); // amkRB,rmnR->akBrn
+                        auto tmp2 = at::tensordot(tmp1, core, {1, 4}, {1, 3}); // amkRB,rmnR->akBrn
                         phi = at::tensordot(tmp2, coreB, {1,2,4}, {1,3,2}).permute({1,0,2}); // akBrn,bknB->arb and permute
                     }
                     else
@@ -823,7 +823,7 @@ namespace AMEn
                         phi = torch::zeros({core.sizes()[3], coreA.sizes()[3], coreB.sizes()[3]}, coreA.options());
                         for(int i=-bandB;i<0;++i)
                         {
-                            auto core_tmp = at::constant_pad_nd(core.index({torch::indexing::Ellipsis, torch::indexing::Ellipsis, torch::indexing::Slice(torch::indexing::None, i), torch::indexing::Ellipsis}, {0,0,-i,0})); 
+                            auto core_tmp = at::constant_pad_nd(core.index({torch::indexing::Ellipsis, torch::indexing::Ellipsis, torch::indexing::Slice(torch::indexing::None, i), torch::indexing::Ellipsis}), {0,0,-i,0}); 
                             
                         }
                     }
