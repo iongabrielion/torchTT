@@ -83,7 +83,7 @@ def gmres_restart(LinOp, b, x0 , N, max_iterations, threshold, resets = 4):
     return x0, converged, iters
                  
 
-def gmres( LinOp, b, x0, N, max_iterations, threshold):
+def gmres(LinOp, b, x0, N, max_iterations, threshold):
 
     converged = False
     
@@ -92,8 +92,9 @@ def gmres( LinOp, b, x0, N, max_iterations, threshold):
     b_norm = tn.linalg.norm(b)
     error = tn.linalg.norm(r) / b_norm
 
-    e1 = tn.zeros((max_iterations+1), dtype = b.dtype, device = b.device)
+    e1 = tn.zeros((max_iterations + 1), dtype=b.dtype, device=b.device)
     e1[0] = 1
+    
     sn = []
     cs = []
 
@@ -103,29 +104,28 @@ def gmres( LinOp, b, x0, N, max_iterations, threshold):
     if not r_norm > 0:
         return x0, True, 0
 
-    Q = tn.empty((N,max_iterations+1), dtype = b.dtype, device = b.device) 
+    Q = tn.empty((N, max_iterations+1), dtype=b.dtype, device=b.device) 
     Q[:,0] = r / r_norm
-    H = tn.zeros((max_iterations+1,max_iterations), dtype = b.dtype, device = b.device)
+    H = tn.zeros((max_iterations + 1, max_iterations), dtype=b.dtype, device=b.device)
     
-    beta = (r_norm * e1).numpy()
+    beta = (r_norm * e1).cpu().numpy()
   
     for k in range(max_iterations):
         
-        tme = datetime.datetime.now()
         q = LinOp.matvec(Q[:,k]).squeeze()
-        tme = datetime.datetime.now() - tme
-        
-        tme = datetime.datetime.now()
+
         for _ in range(2):
-            QCq = Q[:, :k+1].T @ q
-            H[:k+1, k] += QCq
-            q = q - Q[:, :k+1] @ QCq
+            QCq = Q[:, :k + 1].T @ q
+            H[:k + 1, k] += QCq
+            q = q - Q[:, :k + 1] @ QCq
         h = tn.linalg.norm(q)
         
         q = q / h
         H[k + 1, k] = h
-        Q[:,k + 1] = q
-        c, s = apply_givens_rotation(H[:k + 2, k], cs, sn, k + 1)
+        Q[:, k + 1] = q
+        
+        column, c, s = apply_givens_rotation(H[:k + 2, k], cs, sn, k + 1)
+        H[:k + 2, k] = tn.from_numpy(column).to(h.device)
         cs.append(c)
         sn.append(s)
 
@@ -139,24 +139,24 @@ def gmres( LinOp, b, x0, N, max_iterations, threshold):
             converged = True
             break
             
-    y = tn.linalg.solve_triangular(H[:k + 1,:k + 1], tn.tensor(beta[:k + 1]).to(H.device).reshape([-1, 1]), upper=True)
-    x = x0 + Q[:, :k + 1] @ y     
+    y = tn.linalg.solve_triangular(H[:k + 1,:k + 1], tn.from_numpy(beta[:k + 1]).to(H.device).reshape([-1, 1]), upper=True)
+    x = x0 + Q[:, :k + 1] @ y 
     return x, converged, k
     
 
   
 
 def apply_givens_rotation(h, cs, sn, k):
-    dev = h.device
-    h = h.cpu().numpy()
-    xrot = slinalg.get_blas_funcs('rot', (h,))
-    for i in range(k-1):
-        xrot(h[i : i + 1], h[i + 1: i + 2], cs[i], sn[i], n=1, overwrite_x=True, overwrite_y=True)
-    xrotg = slinalg.get_blas_funcs('rotg', (h,))
-    cs_k, sn_k = xrotg(h[k - 1], h[k])
-    xrot(h[k - 1 : k], h[k: k + 1], cs_k, sn_k, n=1, overwrite_x=True, overwrite_y=True)
+    column = h.cpu().numpy()
+    xrot = slinalg.get_blas_funcs('rot', (column,))
+    for i in range(k - 1):
+        xrot(column[i : i + 1], column[i + 1: i + 2], cs[i], sn[i], n=1, overwrite_x=True, overwrite_y=True)
+    xrotg = slinalg.get_blas_funcs('rotg', (column,))
+    cs_k, sn_k = xrotg(column[k - 1], column[k])
+    xrot(column[k - 1 : k], column[k: k + 1], cs_k, sn_k, n=1, overwrite_x=True, overwrite_y=True)
+    #h = tn.from_numpy(column).to(h.device)
  
-    return cs_k, sn_k
+    return column, cs_k, sn_k
 
 
 # class Lop():
