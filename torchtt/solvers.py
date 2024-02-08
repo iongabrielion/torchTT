@@ -912,7 +912,10 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
             if k < d:
                 u, s, v = SVD(solution_now)
                 if trunc_norm == 'fro':
-                    pass
+                    cum_s = tn.cumsum(tn.flipud(s)**2, dim=0)
+                    r = tn.numel(s) - tn.numel(cum_s[cum_s < (real_tol * tn.linalg.norm(s) * damp) ** 2])
+                    if r == 0:
+                        r = 1
                 else:
                     # search for a rank such that offeres small enough residual
                     # TODO: binary search?
@@ -926,10 +929,10 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
                         else:
                             res = tn.linalg.norm(Op.matvec(solution.to(
                                 tn.float32 if use_single_precision else dtype), False).to(dtype) - rhs)
-                        if res > real_tol * norm_rhs:
+                        if res > max(real_tol * norm_rhs * damp, res_new * norm_rhs):
                             break
                     r += 1
-                    r = min([r, tn.numel(s), rmax[k + 1]])
+                r = min([r, tn.numel(s), rmax[k + 1]])
                 u = u[:, :r]
                 v = tn.diag(s[:r]) @ v[:r, :]
                 
@@ -1007,7 +1010,7 @@ def _amen_solve_python(Matrices, b, nswp=22, x0=None, eps=1e-10, rmax=1024, max_
             print('Time ', tme_sweep)
 
         if last:
-            print("swp number = ", swp)
+            #print("swp number = ", swp)
             break
 
         last = max_res < eps
