@@ -7,6 +7,7 @@ Contains iteratiove solvers like GMRES and BiCGSTAB
 import torch as tn
 import datetime
 import numpy as np
+import scipy.linalg as slinalg
 
 def BiCGSTAB(Op, rhs, x0, eps=1e-6, nmax = 40):
     pass
@@ -82,105 +83,80 @@ def gmres_restart(LinOp, b, x0 , N, max_iterations, threshold, resets = 4):
     return x0, converged, iters
                  
 
-def gmres( LinOp, b, x0, N, max_iterations, threshold):
+def gmres(LinOp, b, x0, N, max_iterations, threshold):
 
     converged = False
     
-    r = b - LinOp.matvec(x0)
+    r = (b - LinOp.matvec(x0)).squeeze()
     
     b_norm = tn.linalg.norm(b)
     error = tn.linalg.norm(r) / b_norm
 
-    sn = tn.zeros((max_iterations), dtype = b.dtype, device = b.device)
-    cs = tn.zeros((max_iterations), dtype = b.dtype, device = b.device)
-    e1 = tn.zeros((max_iterations+1), dtype = b.dtype, device = b.device)
+    e1 = tn.zeros((max_iterations + 1), dtype=b.dtype, device=b.device)
     e1[0] = 1
+    
+    sn = []
+    cs = []
 
     err = [error]
     
     r_norm = tn.linalg.norm(r)
-    if not r_norm>0:
+    if not r_norm > 0:
         return x0, True, 0
 
-    Q = tn.zeros((N,max_iterations+1), dtype = b.dtype, device = b.device) 
-    Q[:,0] = r[:,0] / r_norm
-    # Qs = [r/r_norm]
-    H = tn.zeros((max_iterations+1,max_iterations), dtype = b.dtype, device = b.device)
+    Q = tn.empty((N, max_iterations+1), dtype=b.dtype, device=b.device) 
+    Q[:,0] = r / r_norm
+    H = tn.zeros((max_iterations + 1, max_iterations), dtype=b.dtype, device=b.device)
     
-    beta = r_norm * e1
+    beta = (r_norm * e1).cpu().numpy()
   
     for k in range(max_iterations):
         
-        tme = datetime.datetime.now()
-        q = LinOp.matvec(Q[:,k])
-        # q = LinOp.matvec(Qs[k])
-        tme = datetime.datetime.now() - tme
-        # print()
-        # print('time 1',tme, ' k',k,' size ',q.shape[0])
-        
-        tme = datetime.datetime.now()
-        for i in range(k+1):
-            H[i,k] = tn.dot(q.squeeze(),Q[:,i])
-            q = q - tn.reshape(H[i,k]*Q[:,i],[-1,1])
-            # H[i,k] = tn.sum(q*Qs[i])
-            # q = q - H[i,k]*Qs[i]
+        q = LinOp.matvec(Q[:,k]).squeeze()
+
+        for _ in range(2):
+            QCq = Q[:, :k + 1].T @ q
+            H[:k + 1, k] += QCq
+            q = q - Q[:, :k + 1] @ QCq
         h = tn.linalg.norm(q)
-        # tme = datetime.datetime.now() - tme
-        # print('time 2',tme)
         
-        tme = datetime.datetime.now()
         q = q / h
-        H[k+1,k] = h
-        Q[:,k+1] = q[:,0]
-        # Qs.append(q.clone())
-        tme2 = datetime.datetime.now()
-        h, c, s = apply_givens_rotation(H[:(k+2),k]+0,cs,sn,k+1)
-        tme2 = datetime.datetime.now() - tme2
-        H[:(k+2),k] = h
-        cs[k] = c
-        sn[k] = s
-       
-        tme = datetime.datetime.now() - tme
-        # print('time 3',tme,' time 32', tme2)
+        H[k + 1, k] = h
+        Q[:, k + 1] = q
         
-        beta[k+1] = -sn[k]*beta[k]
-        beta[k] = cs[k]*beta[k]
-        error = tn.abs(beta[k+1]) / b_norm
+        column, c, s = apply_givens_rotation(H[:k + 2, k], cs, sn, k + 1)
+        H[:k + 2, k] = tn.from_numpy(column).to(h.device)
+        cs.append(c)
+        sn.append(s)
+
+        xrot = slinalg.get_blas_funcs('rot', (beta,))
+        xrot(beta[k : k + 1], beta[k + 1: k + 2], cs[k], sn[k], n=1, overwrite_x=True, overwrite_y=True)
+
+        error = np.abs(beta[k + 1])
         err.append(error)
         
-        if error <= threshold:
+        if error <= threshold * b_norm:
             converged = True
             break
-    y = tn.linalg.solve(H[:k+1,:k+1],tn.reshape(beta[:k+1],[-1,1]))
-    x = x0 + Q[:,:k+1] @ y     
-    # for i in range(k+1):
-    #   x = x0+Qs[i]*y[i]
+            
+    y = tn.linalg.solve_triangular(H[:k + 1,:k + 1], tn.from_numpy(beta[:k + 1]).to(H.device).reshape([-1, 1]), upper=True)
+    x = x0 + Q[:, :k + 1] @ y 
     return x, converged, k
     
 
   
 
 def apply_givens_rotation(h, cs, sn, k):
-    dev = h.device
-    h = h.cpu().numpy()
-    cs = cs.cpu().numpy()
-    sn = sn.cpu().numpy()
-    for i in range(k-1):
-        temp   =  cs[i]* h[i] + sn[i] * h[i+1]
-        h[i+1] = -sn[i] * h[i] + cs[i] * h[i+1]
-        h[i]   = temp
-  
-    cs_k, sn_k = givens_rotation(h[k-1], h[k])
-
+    column = h.cpu().numpy()
+    xrot = slinalg.get_blas_funcs('rot', (column,))
+    for i in range(k - 1):
+        xrot(column[i : i + 1], column[i + 1: i + 2], cs[i], sn[i], n=1, overwrite_x=True, overwrite_y=True)
+    xrotg = slinalg.get_blas_funcs('rotg', (column,))
+    cs_k, sn_k = xrotg(column[k - 1], column[k])
+    xrot(column[k - 1 : k], column[k: k + 1], cs_k, sn_k, n=1, overwrite_x=True, overwrite_y=True)
+    #h = tn.from_numpy(column).to(h.device)
  
-    h[k-1] = cs_k * h[k-1] + sn_k * h[k]
-    h[k] = 0.0
-    return tn.tensor(h).to(dev), tn.tensor(cs_k).to(dev), tn.tensor(sn_k).to(dev)
-
-def givens_rotation(v1,v2):
-   
-    den = np.sqrt(v1**2+v2**2)
-    return v1/den, v2/den
+    return column, cs_k, sn_k
 
 
 # class Lop():

@@ -10,6 +10,13 @@ import numpy as np
 
 def err_rel(t, ref): return tn.linalg.norm(t-ref).numpy() / \
     tn.linalg.norm(ref).numpy() if ref.shape == t.shape else np.inf
+    
+def create_banded(a, m, A, band=1):
+    A_band = tn.zeros(a, m, m, A, dtype=tn.float64)
+    for k in range(-band, band+1):
+        diag = tn.diagonal(A_band, k, 1, 2)
+        diag += 100 * tn.rand(a, A, diag.shape[-1])
+    return A_band
 
 
 @pytest.mark.parametrize("dtype", [tn.float64, tn.complex128])
@@ -120,7 +127,8 @@ def test_amen_division_preconditioned(dtype):
     assert err_rel(a.full(), y.full()/x.full()) < 1e-11
 
 @pytest.mark.parametrize("dtype", [tn.float64])
-def test_amen_mv(dtype):
+@pytest.mark.parametrize("cpp", [False, True] if tntt.cpp_enabled() else [False])
+def test_amen_mv(dtype, cpp):
     """
     Test the AMEn matvec.
     """
@@ -133,9 +141,85 @@ def test_amen_mv(dtype):
     A = A + A + A + A + A
     x = x + x + x + x + x
 
-    C = tntt.amen_mv(A, x)
+    C = tntt.amen_mv(A, x, use_cpp=cpp)
 
     assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+
+    bands_A = [1, 1, 1]
+    A = tntt.randn([(128, 128), (32, 32), (32, 32)], [1, 20, 5, 1], dtype=tn.float64)
+    x = tntt.randn([128, 32, 32], [1, 4, 13, 1], dtype=tn.float64)
+    for i in range(len(A.cores)):
+        A_core = A.cores[i]
+        A.cores[i] = create_banded(A_core.shape[0], A_core.shape[1], A_core.shape[-1], bands_A[i])
+    
+    yr = 25 * A @ x
+    
+    A = A + A + A + A + A
+    x = x + x + x + x + x
+    
+    y = tntt.amen_mv(A, x)
+    assert ((y-yr).norm()/yr.norm()) < 1e-11
+    y = tntt.amen_mv(A, x, bandsA=bands_A)
+    assert ((y-yr).norm()/yr.norm()) < 1e-11
+    
+@pytest.mark.parametrize("dtype", [tn.float64])
+@pytest.mark.parametrize("cpp", [False, True] if tntt.cpp_enabled() else [False])
+def test_amen_mv_multiple(dtype, cpp):
+    """
+    Test the AMEn matvec with multiple vectors.
+    """
+
+    A = tntt.randn([(3, 4), (5, 6), (7, 8), (2, 3)], [1, 2, 2, 3, 1], dtype=dtype)
+    xs = []
+    Cr = 0
+    for i in range(8):
+        xs.append(tntt.randn([4, 6, 8, 3], [1, 3, 2, 2, 1], dtype=dtype))
+        xs[-1] = xs[-1] - xs[-1] + xs[-1]
+        Cr = Cr + A@xs[-1]
+    C = tntt.amen_mv(A, xs, use_cpp=cpp)
+
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+
+@pytest.mark.parametrize("dtype", [tn.float64])
+@pytest.mark.parametrize("cpp", [False, ] if tntt.cpp_enabled() else [False])
+def test_amen_mvm(dtype, cpp):
+    """
+    Test the AMEn matvec with multiple vectors.
+    """
+
+    n = 3
+    As = [tntt.randn([(3, 4), (5, 6), (7, 8), (2, 3)], [1, 2, 2, 3, 1], dtype=dtype) for i in range(n)]
+    xs = [tntt.randn([4,6,8,3], [1, 2, 2, 1, 1], dtype=dtype) for i in range(n)]
+    Bs = [tntt.randn([( 4,2), (6,3), (8,2), (3,1)], [1, 2, 2, 3, 1], dtype=dtype) for i in range(n)]
+
+    Cr = 0
+    for i in range(n):
+        Cr += As[i] @ tntt.diag(xs[i]) @ Bs[i]
+        Cr = Cr.round(1e-14)
+    C = tntt.amen_mvm(As, xs, Bs, use_cpp=cpp)
+
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+    
+@pytest.mark.parametrize("dtype", [tn.float64])
+def test_amen_hadamard(dtype):
+    
+    xs = [tntt.randn([4,6,8,3], [1, 2, 2, 1, 1], dtype=dtype) for i in range(8)]
+
+    y_ref = xs[0]*xs[1] + xs[2]*xs[3]*xs[4] + xs[5]*xs[6] + xs[7]
+    y_ref = y_ref.round(1e-14)
+
+    y = tntt.amen_hadamard([(xs[0], xs[1]), (xs[2],xs[3],xs[4]), (xs[5], xs[6]), (xs[7], )])
+
+    assert (y-y_ref).norm()/y_ref.norm() < 1e-11
+    
+    As = [tntt.randn([(4,2),(3,4),(5,2),(3,3)], [1, 2, 2, 1, 1], dtype=dtype) for i in range(8)]
+
+    y_ref = As[0]*As[1] + As[2]*As[3]*As[4] + As[5]*As[6] + As[7]
+    y_ref = y_ref.round(1e-14)
+
+    y = tntt.amen_hadamard([(As[0], As[1]), (As[2],As[3],As[4]), (As[5], As[6]), (As[7], )])
+
+    assert (y-y_ref).norm()/y_ref.norm() < 1e-11
 
 @pytest.mark.parametrize("dtype", [tn.float64])
 def test_amen_mm(dtype):
@@ -153,6 +237,29 @@ def test_amen_mm(dtype):
 
     C = tntt.amen_mm(A, B)
 
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+    
+    bands_A = [2, 1, 0]
+    bands_B = [3, 2, 0]
+    A = tntt.random([(128, 128), (32, 32), (16, 16)], [1, 2, 20, 1])
+    B = tntt.random([(128, 128), (32, 32), (16, 16)], [1, 20, 3, 1])
+    for i in range(len(A.cores)):
+        A_core = A.cores[i]
+        B_core = B.cores[i]
+        A.cores[i] = create_banded(A_core.shape[0], A_core.shape[1], A_core.shape[-1], bands_A[i])
+        B.cores[i] = create_banded(B_core.shape[0], B_core.shape[1], B_core.shape[-1], bands_B[i])
+    Cr = 25 * A @ B
+    
+    A = A + A + A + A + A
+    B = B + B + B + B + B
+        
+    C = tntt.amen_mm(A, B)
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+    C = tntt.amen_mm(A, B, bandsA=bands_A)
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+    C = tntt.amen_mm(A, B, bandsB=bands_B)
+    assert ((C-Cr).norm()/Cr.norm()) < 1e-11
+    C = tntt.amen_mm(A, B, bandsA=bands_A, bandsB=bands_B)
     assert ((C-Cr).norm()/Cr.norm()) < 1e-11
 
 
