@@ -15,6 +15,7 @@ from ._extras import eye, zeros, kron, ones, random, randn, reshape, meshgrid , 
 # from .torchtt import TT, eye, zeros, kron, ones, random, randn, reshape, meshgrid , dot, elementwise_divide, numel, rank1TT, bilinear_form, diag, permute, load, save, cat, pad 
 from ._dmrg import dmrg_hadamard 
 from ._amen import amen_mm, amen_mv, amen_mvm, amen_hadamard
+from ._inversion import amen_invert
 from . import solvers
 from . import grad
 # from .grad import grad, watch, unwatch
