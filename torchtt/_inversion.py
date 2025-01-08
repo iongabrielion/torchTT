@@ -13,6 +13,30 @@ import opt_einsum as oe
 from .solvers import amen_solve
 
 def amen_invert(A, nswp = 20, x0 = None, eps = 1e-10, rmax = 1000, max_full = 500, kickrank = 4, kick2 = 0, trunc_norm = 'res', local_iterations = 40, resets = 2, verbose = True, preconditioner = None):
+    """
+    TTM inversion using AMEn.
+
+    Args:
+        A (torchtt.TT): the TTM. Must be square.
+        nswp (int, optional): number of sweeps. Defaults to 20.
+        x0 (torchtt.TT, optional): initial quess of the inverse. Defaults to None.
+        eps (float, optional): relative tolerance. Defaults to 1e-10.
+        rmax (int, optional): maximum rank of the inverse. Defaults to 1000.
+        max_full (int, optional): maximum size of the local system that is still solved with the direct solver. Defaults to 500.
+        kickrank (int, optional): the kickrank. Defaults to 4.
+        kick2 (int, optional): kick2. Defaults to 0.
+        trunc_norm (str, optional): norm truncation option. Defaults to 'res'.
+        local_iterations (int, optional): number of GMRES iterations to solve the local systems iteratively. Defaults to 40.
+        resets (int, optional): number of GMRES resets. Defaults to 2.
+        verbose (bool, optional): verbose flag. Defaults to True.
+        preconditioner (str | None, optional): preconditioner for local system. Defaults to None.
+
+    Raises:
+        Exception: _description_
+
+    Returns:
+        torchtt.TT: the inverse A^-1.
+    """
     N = A.N 
     if A.M != N:
         raise Exception("Only works for quadratic matrix")
@@ -28,7 +52,7 @@ def amen_invert(A, nswp = 20, x0 = None, eps = 1e-10, rmax = 1000, max_full = 50
         c = A.cores[i]
         c = tn.einsum('rmnR,lk->rmlnkR', c, tn.eye(N[i], device=device, dtype=dtype))
         cores.append(tn.reshape(c, [c.shape[0],N[i]*N[i],N[i]*N[i],-1]))
-    print(torchtt.TT(cores), b)
+
     Ainv = amen_solve(torchtt.TT(cores), b, nswp=nswp, x0=x0, eps=eps, rmax=rmax, max_full=max_full, kickrank=kickrank, kick2=kick2, trunc_norm=trunc_norm, local_iterations=local_iterations, resets=resets, verbose=verbose, preconditioner=preconditioner)
     return torchtt.TT([tn.reshape(Ainv.cores[i], [Ainv.cores[i].shape[0], N[i], N[i], Ainv.cores[i].shape[2]]) for i in range(len(A.N))])
     
